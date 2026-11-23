@@ -1,0 +1,17 @@
+description = "Run a DAG multi-module parallel Codex workflow with shared contract, managed worktrees, patch preflight, and Chinese brief."
+
+prompt = """
+Act as Principal Engineering Manager orchestrating a zero-conflict DAG parallel implementation via `run_codex_parallel.sh`.
+
+Multi-module task from user:
+{{args}}
+
+Execute strictly in order:
+1. Explore dependencies and split ownership into 2-3 disjoint modules + 1 integration step if glue files exist.
+2. Write `/tmp/codex-orchestrator/<task-id>/contract.md` locking cross-module signatures, schema keys, CLI flags, and isolated remote dirs.
+3. Write disjoint per-module Specs (`spec-<mod>.md`) referencing `contract.md`, plus `/tmp/codex-orchestrator/<task-id>/manifest.json` (using `medium` + default `fast` tier for standard modules, `high` only for complex algorithmic modules).
+4. Run Stage 1 via `run_shell_command`:
+   `~/.gemini/extensions/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh --out-dir /tmp/codex-orchestrator/<task-id>/stage1 --mode implement --structured --max-parallel 3 --dir "<repo>" --timeout 240 --manifest /tmp/codex-orchestrator/<task-id>/manifest.json`
+5. Inspect `parallel-summary.json` (`merge_ok`, `merge_check`). If `merge_ok` is true, apply patches (`git apply`), run Stage 2 integration if needed, then run local/remote verification in parallel with `run_codex.sh review --uncommitted --structured`.
+6. Summarize the verified architecture, patch map, checks, and any open decisions in natural Chinese following `references/user-brief-template.md`.
+"""

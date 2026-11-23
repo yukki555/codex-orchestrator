@@ -1,0 +1,18 @@
+description = "Run a single-pass structured Codex CLI review on uncommitted Git changes and summarize risks in plain Chinese."
+
+prompt = """
+Act as Principal Engineering Manager running an independent structured Git QA review.
+
+Repository snapshot (uncommitted):
+!{git status --short}
+!{git diff --stat HEAD}
+
+Optional focus from user: {{args}}
+
+Execute strictly in order:
+1. Invoke `run_shell_command`:
+   `~/.gemini/extensions/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh review --dir "." --uncommitted --structured --timeout 240 --out-dir /tmp/codex-orchestrator/review-$(date +%Y%m%d-%H%M%S) --prompt "Review all uncommitted changes thoroughly for correctness bugs, edge cases, backward-compatibility breaks, numerical/concurrency issues, and missing test coverage. Focus: {{args}}"`
+2. Confirm `structured_valid: true` and read `last_message.md`.
+3. Spot-check at least 1-2 cited `file:line` claims directly via `read_file` to verify facts vs hypotheses.
+4. Present a clear, prioritized Chinese review brief following `references/user-brief-template.md` (never paste raw Codex output).
+"""

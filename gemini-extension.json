@@ -1,0 +1,6 @@
+{
+  "name": "codex-orchestrator",
+  "version": "2.1.0",
+  "description": "Manager/Implementer Dual-Brain Gemini CLI extension for orchestrating OpenAI Codex CLI (DAG parallel worktrees, decoupled fast-tier speed routing, structured reviews, and executive Chinese briefs).",
+  "contextFileName": "GEMINI.md"
+}

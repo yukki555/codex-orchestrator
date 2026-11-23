@@ -1,56 +1,60 @@
-# Codex Orchestrator (`v2.1.0`)
+# Codex Orchestrator — Gemini CLI Edition (`gemini-cli` branch, `v2.1.0`)
 
-A **Manager / Implementer Dual-Brain** plugin for Google Antigravity that pairs **Gemini** (Principal Engineering Manager & Decision-Maker) with **local OpenAI Codex CLI** (High-Execution Staff Implementer & Independent Reviewer).
+A lightweight, native **Google Gemini CLI Extension** implementing the **Manager / Implementer Dual-Brain** workflow: **Gemini CLI** serves as the high-IQ **Principal Engineering Manager & Decision-Maker** (lighter and faster than heavy IDE harnesses), while **local OpenAI Codex CLI** serves as the **High-Execution Staff Implementer & Independent Reviewer**.
 
-## Architecture Overview
+> Looking for the **Antigravity Plugin Edition**? Check the [`main`](https://github.com/yukki555/codex-orchestrator/tree/main) branch.
+
+## Why Gemini CLI Harness (`gemini-cli` vs `main`)
+
+* **Lower Orchestration Overhead**: Gemini CLI invokes `run_codex.sh` and `run_codex_parallel.sh` directly via `run_shell_command` (no mandatory intermediate worker hop unless you explicitly call `@codex-worker` to isolate verbose SSH/test logs).
+* **No IDE Plan/Execute Switching Latency**: Single continuous Manager loop for codebase exploration, tradeoff alignment, contract authoring, parallel dispatch, and executive Chinese synthesis.
+* **Identical High-Execution Codex Engine**: Shares the exact same `v2.1.0` `run_codex.sh`, `run_codex_parallel.sh`, and `codex-output-schema.json` core as `main` (decoupled `low`/`medium` -> `service_tier="fast"`, managed Git worktrees + `changes.patch` + `merge_check`, smart `review --structured`, `partial_progress` on timeout, zero-intrusion `--ignore-user-config --ignore-rules`).
 
 ```mermaid
 flowchart LR
-    U["User Request"] --> G["Gemini Manager<br/>Explore / Align Decisions / Lock contract.md & Specs"]
-    G --> W["codex-worker Subagent<br/>Orchestrate Codex CLI + Remote SSH/GPU Tests"]
-    W --> C["Local Codex CLI<br/>Local Coding / Static Checks / Structured QA<br/>(Strict JSON Evidence Packet)"]
-    C --> W
-    W --> G2["Gemini Layered Review & Chinese Brief<br/>(TL;DR + Causal Chain + File Map + Decisions)"]
+    U["User Prompt / Slash Command"] --> H["BeforeAgent Hook<br/>(Per-Turn Opt-Out Track)"]
+    H --> G["Gemini CLI Manager<br/>Explore / Align / Write contract.md & Specs"]
+    G -- "BeforeTool Guard<br/>(Blocks Direct >10L Code Edits)" --> R["run_shell_command -> run_codex.sh / run_codex_parallel.sh<br/>(or @codex-worker Local Subagent)"]
+    R --> C["Local Codex CLI (gpt-6.2-sol / astra)<br/>Local Edits & Checks -> Strict JSON Evidence"]
+    C --> G2["Gemini Layered Verification & Chinese Brief"]
     G2 --> U
 ```
 
-* **Gemini (Manager)**: Explores codebases, aligns architecture tradeoffs with the user, locks shared cross-module contracts (`/tmp/codex-orchestrator/<task-id>/contract.md`) and concise Specs, orchestrates `codex-worker` / parallel runners, performs layered verification, and rewrites terse Codex logs into clear human-readable Chinese briefs.
-* **Local Codex CLI (Implementer & Reviewer)**: Executes all new local code files, `> 10`-line logic edits, refactors, test authoring, deep diagnostics, and Git diff QA cleanly via non-interactive `codex exec`.
-* **Hook Guardrail (`codex-delegate-guard`)**: `PreToolUse` hook prevents Gemini from bypassing Codex on non-trivial local source edits while allowing docs/configs, `/tmp/`, `~/.gemini/`, `<= 10`-line micro-edits, and explicit user opt-outs (`不用codex` / `skip codex` / `你直接改`).
-
-## Key Features (`v2.1.0`)
-
-* **Decoupled Speed & Reasoning Routing (`--speed`)**: Automatically enables `service_tier="fast"` (`2x` speed) for `low`/`medium` effort across both `gpt-6.2-sol` and `gpt-6.2-astra`, while keeping `high`+ at `default` unless `--speed fast` is passed (`ultrafast` supported on `gpt-6.2-sol`, auto-downgrades safely on `gpt-6.2-astra`).
-* **DAG Parallel Worktrees & Conflict Preflight (`run_codex_parallel.sh`)**: For `>= 3` loosely coupled files or `> 200` lines, creates managed detached Git worktrees per task, captures modified + new untracked files via `git add -N` into `changes.patch`, cleans up passing worktrees, and runs both `git apply --check` and sequential stacked apply verification (`merge_check` / `merge_ok`). Supports heterogeneous per-task overrides via `--manifest <FILE.json>` and `--shared-dir` for proven disjoint files.
-* **Zero-Intrusion Desktop Config Isolation**: Defaults to `--ignore-user-config` and `--ignore-rules` (reusing `~/.codex` auth while avoiding macOS sandbox permission errors and noisy Desktop MCP configs), with automatic fallback retry on `--use-user-config` / `--use-rules`.
-* **Smart Single-Pass `review` Routing**: `review` runs with `--structured`, `--spec`, `--prompt`, or `--max-cmds > 0` automatically route through read-only `codex exec` with a bounded Git status/diff snapshot and JSON Schema enforcement.
-* **Session Continuity & Telemetry**: `resume` supports repeatable `--add-dir` writable roots and auto-inherits prior `model` and `add_dirs` by `thread_id`; failed or timed-out runs extract `partial_progress` (`modified_files`, last `agent_message`s, `failed_commands`, `in_flight_commands`) into `summary.json` and stdout.
-
 ## Prerequisites
 
-1. **Google Antigravity** (global plugin discovery under `~/.gemini/config/plugins/`).
-2. **OpenAI Codex CLI** (`codex` >= `0.171.0`, e.g. `npm install -g @openai/codex@latest`), already signed in (`~/.codex/auth.json`).
-3. `python3`, `git`, and macOS/Linux `bash` (`3.2+`).
+1. **Google Gemini CLI** (`npm install -g @google/gemini-cli`), signed in with your Google account.
+2. **OpenAI Codex CLI** (`codex` >= `0.171.0`, `npm install -g @openai/codex@latest`), signed in via `~/.codex`.
+3. `python3` (`3.9+`), `git`, and macOS/Linux `bash` (`3.2+`).
 
 ## Installation
 
-Clone directly into your global Antigravity plugins directory:
+Install directly from this branch with Gemini CLI:
 
 ```bash
-mkdir -p ~/.gemini/config/plugins
-git clone <YOUR_REPO_URL> ~/.gemini/config/plugins/codex-orchestrator
+gemini extensions install https://github.com/yukki555/codex-orchestrator --ref gemini-cli
 ```
 
-Antigravity automatically discovers `plugin.json`, global policy rules (`rules/AGENTS.md`), hooks (`hooks.json`), subagents (`agents/codex-worker.md`), and skills (`skills/codex-orchestrator/SKILL.md`).
-
-## Usage
-
-In normal Antigravity sessions, just describe your engineering task in natural language—global rules and the `codex-delegate-guard` hook automatically drive the Manager/Implementer workflow.
-
-### Direct CLI Examples
+Or clone manually into `~/.gemini/extensions/`:
 
 ```bash
-SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
+mkdir -p ~/.gemini/extensions
+git clone -b gemini-cli https://github.com/yukki555/codex-orchestrator.git ~/.gemini/extensions/codex-orchestrator
+```
+
+## Built-in Workflows & Commands
+
+| Entry Point | Purpose |
+| :--- | :--- |
+| Natural conversation | Persistent `GEMINI.md` rules + `BeforeAgent`/`BeforeTool` hooks enforce Manager/Implementer delegation automatically; include `skip codex` / `不用codex` / `你直接改` in a prompt to opt out for that turn. |
+| `/codex:impl <task>` | Explore relevant code -> write `/tmp/codex-orchestrator/<task>/spec.md` -> run `run_codex.sh implement --structured` -> verify -> Chinese brief. |
+| `/codex:review [focus]` | Capture uncommitted Git snapshot -> single-pass `run_codex.sh review --uncommitted --structured` -> spot-check `file:line` -> Chinese risk brief. |
+| `/codex:dag <task>` | Author `contract.md` + disjoint module Specs + `manifest.json` -> `run_codex_parallel.sh` -> `merge_check` -> `git apply` -> parallel GPU/E2E verification & review -> Chinese brief. |
+| `@codex-worker` | Isolated local subagent (`read_file`, `write_file`, `run_shell_command`; omits `replace`) for multi-round repair loops or remote SSH/GPU verification logs. |
+
+## Direct CLI Examples
+
+```bash
+SCRIPTS=~/.gemini/extensions/codex-orchestrator/skills/codex-orchestrator/scripts
 
 # 1. Default medium+fast structured implementation
 "$SCRIPTS/run_codex.sh" implement \
@@ -59,48 +63,40 @@ SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/sc
   --spec /tmp/codex-orchestrator/task-1/spec.md \
   --out-dir /tmp/codex-orchestrator/task-1/implement
 
-# 2. High-effort architecture consultation with fast speed override
-"$SCRIPTS/run_codex.sh" consult \
-  --dir "/path/to/repo" --effort high --speed fast --ephemeral --structured \
-  --spec /tmp/codex-orchestrator/task-2/spec.md \
-  --out-dir /tmp/codex-orchestrator/task-2/consult
-
-# 3. Single-pass structured Git diff review
+# 2. Single-pass structured Git diff review
 "$SCRIPTS/run_codex.sh" review \
   --dir "/path/to/repo" --uncommitted --structured \
   --prompt "Check edge cases, numerical invariants, and backward compatibility." \
-  --out-dir /tmp/codex-orchestrator/task-3/review
+  --out-dir /tmp/codex-orchestrator/task-2/review
 
-# 4. Parallel managed-worktree implementation with manifest overrides
+# 3. Parallel managed-worktree DAG implementation with manifest
 "$SCRIPTS/run_codex_parallel.sh" \
-  --out-dir /tmp/codex-orchestrator/task-4/parallel-impl \
+  --out-dir /tmp/codex-orchestrator/task-3/parallel-impl \
   --mode implement --structured --max-parallel 3 \
   --dir "/path/to/repo" --timeout 240 \
-  --manifest /tmp/codex-orchestrator/task-4/manifest.json
+  --manifest /tmp/codex-orchestrator/task-3/manifest.json
 ```
 
-Example `manifest.json`:
+## Verification
 
-```json
-{
-  "tasks": [
-    { "name": "core",  "spec": "/tmp/codex-orchestrator/task-4/spec-core.md", "effort": "high", "speed": "fast" },
-    { "name": "data",  "spec": "/tmp/codex-orchestrator/task-4/spec-data.md", "add_dirs": ["/path/to/tests"] },
-    { "name": "tests", "spec": "/tmp/codex-orchestrator/task-4/spec-tests.md" }
-  ]
-}
+Run the bundled standard-library extension regression suite:
+
+```bash
+python3 -m unittest discover -s ~/.gemini/extensions/codex-orchestrator/tests -p 'test_*.py' -v
 ```
 
-## Repository Structure
+## Repository Structure (`gemini-cli`)
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json` | Antigravity plugin manifest (`v2.1.0`) |
-| `rules/AGENTS.md` | Always-on Manager/Implementer delegation, DAG parallelism, and synthesis policies |
-| `hooks.json` | `PreToolUse` hook registration for `codex-delegate-guard` |
-| `agents/codex-worker.md` | Dedicated Codex execution & verification subagent definition |
-| `skills/codex-orchestrator/SKILL.md` | Full orchestration workflow handbook |
-| `skills/codex-orchestrator/scripts/run_codex.sh` | Single-session Codex CLI runner (`consult`/`implement`/`review`/`resume`) |
-| `skills/codex-orchestrator/scripts/run_codex_parallel.sh` | Parallel DAG runner with managed Git worktrees, patch export, and `merge_check` |
-| `skills/codex-orchestrator/scripts/hook_delegate_guard.py` | `PreToolUse` code-delegation guard script |
-| `skills/codex-orchestrator/references/` | Strict output JSON Schema, GPT-6.2 task Spec template, and executive brief template |
+| `gemini-extension.json` | Gemini CLI extension manifest (`v2.1.0`, points `contextFileName` to `GEMINI.md`) |
+| `GEMINI.md` | Always-on Manager/Implementer playbook, DAG gate, and Chinese synthesis policy |
+| `hooks/hooks.json` | Registers `BeforeAgent` (turn opt-out tracker) and `BeforeTool` (`codex-delegate-guard`) |
+| `agents/codex-worker.md` | Local subagent definition (`kind: local`, `tools: [read_file, write_file, run_shell_command]`) |
+| `commands/codex/{impl,review,dag}.toml` | Custom slash commands (`/codex:impl`, `/codex:review`, `/codex:dag`) |
+| `skills/codex-orchestrator/SKILL.md` | Orchestration handbook and speed/budget routing matrix |
+| `skills/codex-orchestrator/scripts/hook_delegate_guard.py` | Dual-mode `BeforeAgent`/`BeforeTool` (plus Antigravity `PreToolUse`) guard |
+| `skills/codex-orchestrator/scripts/run_codex.sh` | Single-session Codex runner (`consult`/`implement`/`review`/`resume`) |
+| `skills/codex-orchestrator/scripts/run_codex_parallel.sh` | Parallel DAG runner with managed Git worktrees, `changes.patch`, and `merge_check` |
+| `skills/codex-orchestrator/references/` | Output JSON Schema, GPT-6.2 task Spec template, and executive brief template |
+| `tests/test_gemini_cli_extension.py` | Unit tests covering manifest, hooks, TOML commands, subagent frontmatter, and guard decisions |
