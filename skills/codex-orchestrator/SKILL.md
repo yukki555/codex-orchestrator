@@ -1,30 +1,25 @@
 ---
 name: codex-orchestrator
 description: >-
-  Orchestrate local OpenAI Codex CLI (codex exec) directly via run_shell_command or
-  via @codex-worker using run_codex.sh / run_codex_parallel.sh for local coding, DAG
-  parallel multi-module implementation, debugging, test authoring, and independent
-  code reviews. Always use for new local code files, edits >10 lines, and Codex QA.
+  Orchestrate local OpenAI Codex CLI (codex exec) directly via run_command or via
+  codex-worker using run_codex.sh / run_codex_parallel.sh for local coding, DAG parallel
+  multi-module implementation, debugging, test authoring, and independent code reviews.
+  Always use for new local code files, edits >10 lines, and Codex QA.
 ---
 
-# Codex Orchestrator (Gemini CLI Edition, v2.1)
+# Codex Orchestrator (`agy` CLI Edition, v2.1)
 
-Operate a **Manager + High-Execution Implementer** workflow: **Gemini CLI** acts as the **Principal Engineering Manager & Decision-Maker**, while local **Codex CLI** acts as the **High-Execution Staff Implementer & Independent Reviewer**.
+Operate a **Manager + High-Execution Implementer** workflow in **Antigravity CLI (`agy`)** & App: Gemini acts as the **Principal Engineering Manager & Decision-Maker**, while local **Codex CLI** acts as the **High-Execution Staff Implementer & Independent Reviewer**.
 
-## Role Split & Delegate Guard
+## Role Split, `agy` Speedups & Delegate Guard
 
-* **Gemini CLI (Principal Engineering Manager & Decision-Maker)**:
-  * Explores context via `read_file` / search, aligns architecture and tradeoffs with the user, locks shared interface contracts & GPT-6.2-tuned Specs under `/tmp/codex-orchestrator/<task-id>/`, orchestrates `run_codex.sh` / `run_codex_parallel.sh` directly via `run_shell_command` (or via `@codex-worker` when isolating noisy logs or remote SSH checks), verifies diffs/tests, and rewrites raw evidence into human-readable review briefs.
-  * **Guardrail**: The extension's `BeforeAgent` + `BeforeTool` hooks (`codex-delegate-guard`) block Gemini CLI from creating new code files via `write_file` or making `> 10`-line logic-code edits via `replace` unless the user explicitly asks to skip Codex in that turn (`不用codex` / `skip codex` / `你直接改`).
-* **Codex CLI (High-Execution Local Implementer & Reviewer)**:
-  * Executes local coding (`implement`), structured diagnostics (`consult`), and Git QA (`review`), continuing on short threads via `resume` or fresh targeted runs when needed.
-  * **Local-Only Boundary**: Keep Codex local to code/static/unit checks without `network_access=true` SSH loops; let Gemini CLI (`run_shell_command`) or `@codex-worker` run remote SSH syncs and GPU/PyTorch tests.
-
-## Gemini CLI Direct vs `@codex-worker` Subagent Routing
-
-* **Direct `run_shell_command` invocation (Preferred for low latency)**: Ideal in Gemini CLI for single-turn `consult`, `review --structured`, clean 1-shot `implement`, or `run_codex_parallel.sh --manifest` DAG fan-outs (zero subagent hop overhead).
-* **`@codex-worker` local subagent**: Use when you want to isolate multi-round repair loops (`<= 2` rounds), SHA-256 remote SSH syncs, and verbose GPU/PyTorch test logs out of the main Manager conversation.
-* **Custom Slash Shortcuts**: `/codex:impl` (single implementation), `/codex:review` (structured diff QA), `/codex:dag` (multi-module DAG parallel workflow).
+* **Gemini in `agy` CLI (Principal Engineering Manager & Decision-Maker)**:
+  * Explores context via `read_file` / search, aligns architecture and tradeoffs with the user (`/plan`, `/grill-me`), locks shared interface contracts & GPT-6.2-tuned Specs under `/tmp/codex-orchestrator/<task-id>/`, orchestrates `run_codex.sh` / `run_codex_parallel.sh` directly via `run_command` (or via `codex-worker` to isolate multi-round repairs or remote SSH logs), verifies diffs/tests, and rewrites raw evidence into human-readable Chinese briefs.
+  * **Guardrail**: The plugin's root `hooks.json` (`PreToolUse` `codex-delegate-guard`) blocks Gemini from creating new code files or making `> 10`-line logic edits directly unless the user explicitly asks to skip Codex (`不用codex` / `skip codex` / `你直接改`).
+* **Direct `run_command` vs `codex-worker` Subagent**:
+  * In `agy` CLI (`--mode auto` or Turbo `always-proceed`), calling `run_codex.sh` / `run_codex_parallel.sh` directly via `run_command` avoids unnecessary subagent hop latency on single-turn `consult`, `review --structured`, clean 1-shot `implement`, or `--manifest` parallel fan-outs.
+  * Delegate to `codex-worker` when isolating multi-round repair loops (`<= 2` rounds), SHA-256 remote SSH syncs, and noisy GPU/PyTorch test logs (monitor with `/agents` & `/tasks`).
+* **Bundled Slash Skills**: `/impl` (single implementation), `/review` (structured diff QA), and `/dag` (multi-module DAG parallel workflow).
 
 ## DAG Parallelism Gate (Multi-File Features)
 
@@ -65,7 +60,7 @@ Before replying to the user after any Codex run:
 
 1. **Diff & Scope Check (`implement`)**: Inspect `git status` / `git diff` (or `parallel-summary.json` `merge_ok` + patches) to confirm zero scope drift.
 2. **Layered Verification (No Redundant Reruns)**:
-   * If `@codex-worker` (or Codex self-check) already verified unit tests and remote SHA-256 sync with real command outputs, Manager **does not** re-run identical CPU unit tests — instead spot-check 1–2 code edits (`read_file`) and run higher-tier gates (multi-GPU smoke / E2E).
+   * If `codex-worker` (or Codex self-check) already verified unit tests and remote SHA-256 sync with real command outputs, Manager **does not** re-run identical CPU unit tests — instead spot-check 1–2 code edits (`read_file`) and run higher-tier gates (multi-GPU smoke / E2E).
    * For `consult` / `review`, spot-check at least 1–2 cited `file:line` claims directly and label verified facts vs hypotheses.
 3. **Human-Readable Brief Rewrite**:
    * **Hard Ban**: Never paste, echo, or mechanically translate Codex's raw `last_message.md` text/JSON to the user.
@@ -74,7 +69,7 @@ Before replying to the user after any Codex run:
 ## Invocation Examples
 
 ```bash
-SCRIPTS=~/.gemini/extensions/codex-orchestrator/skills/codex-orchestrator/scripts
+SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
 
 # 1. Default medium+fast structured implementation
 "$SCRIPTS/run_codex.sh" implement \

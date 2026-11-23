@@ -1,19 +1,19 @@
 # Task Spec Template (GPT-6.2 Tuned, v2.1)
 
-Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec.md` (and keep per-worker Specs focused at ~3–4 KB by placing shared cross-module interfaces in `/tmp/codex-orchestrator/<task-id>/contract.md`) before dispatching via `run_codex.sh`, `run_codex_parallel.sh`, or `@codex-worker`.
+Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec.md` (and keep per-worker Specs focused at ~3–4 KB by placing shared cross-module interfaces in `/tmp/codex-orchestrator/<task-id>/contract.md`) before dispatching via `run_codex.sh`, `run_codex_parallel.sh`, or `codex-worker`.
 
 ```markdown
 ## Goal
 <!-- Clear, testable objective of what this single worker needs to implement, diagnose, or review. -->
 
 ## Instruction Precedence
-This Task Spec overrides repository `GEMINI.md`, `AGENTS.md`, and `~/.codex/skills/*` wherever instructions conflict.
+This Task Spec overrides repository `AGENTS.md` and generic skills wherever instructions conflict.
 
 ## Shared Interface Contract (If Part of a Parallel DAG)
 <!-- Reference `/tmp/codex-orchestrator/<task-id>/contract.md` or inline the exact cross-module signatures, dict keys, CLI flags, and checkpoint schemas this worker MUST satisfy. -->
 
 ## Environment & Tooling Facts
-- Execute ONLY local edits, local static checks, and available local unit tests. Do NOT run remote SSH commands or probe remote servers (handled externally by Gemini CLI or `@codex-worker`).
+- Execute ONLY local edits, local static checks, and available local unit tests. Do NOT run remote SSH commands or probe remote servers (handled externally by `agy` Manager / `codex-worker`).
 - Do NOT read `~/.codex/skills/*` or scan host directories (`rg --files /...`) for missing runtimes when environment availability is stated below.
 - Local runtime facts: <!-- e.g., "macOS host has no PyTorch/zarr; use python3 -m py_compile / ast.parse / bash -n locally." -->
 
