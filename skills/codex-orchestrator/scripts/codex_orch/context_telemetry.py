@@ -1,0 +1,313 @@
+"""Read transcript context usage and persist per-conversation handoff state."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import TypeVar
+
+from .env import ensure_private_dir
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class TranscriptTelemetry:
+    transcript_path: str
+    exists: bool
+    active_tokens: int
+    input_tokens: int
+    cache_read_tokens: int
+    output_tokens: int
+    active_model: str
+    recent_models: tuple[str, ...]
+    checkpoint_count: int
+    checkpoint_epoch: int
+    last_step_index: int | None
+    last_planner_step_index: int | None
+    malformed_lines: int
+
+
+@dataclass(frozen=True)
+class ContextAssessment:
+    active_tokens: int
+    context_limit: int
+    utilization_ratio: float
+    soft_threshold: int
+    hard_threshold: int
+    emergency_threshold: int
+    band: str
+    checkpoint_count: int
+    checkpoint_epoch: int
+    checkpoint_fatigue: bool
+    headroom_to_auto_compact: int
+    active_model: str
+    recent_models: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _parse_transcript_row(line: bytes) -> dict | None:
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def _planner_tokens(row: dict) -> tuple[int, int, int]:
+    usage = row.get("usage", row.get("token_usage", row.get("tokenUsage", {})))
+    if not isinstance(usage, dict):
+        usage = {}
+    tokens = []
+    for key, camel, short in (
+        ("input_tokens", "inputTokens", "input"),
+        ("cache_read_tokens", "cacheReadTokens", "cache_read"),
+        ("output_tokens", "outputTokens", "output"),
+    ):
+        value = row.get(key, row.get(camel, usage.get(key, usage.get(camel, usage.get(short)))))
+        tokens.append(value if type(value) is int and value >= 0 else 0)
+    return tuple(tokens)
+
+
+def read_transcript_telemetry(
+    transcript_path: str | Path | None, *, tail_bytes: int = 262144
+) -> TranscriptTelemetry:
+    path = str(transcript_path) if transcript_path is not None else ""
+    exists = False
+    checkpoints = malformed = 0
+    step_index = planner_index = None
+    planner = None
+    last_model = ""
+    recent_models: dict[str, None] = {}
+
+    try:
+        if path:
+            with Path(path).open("rb") as stream:
+                exists = True
+                end = stream.seek(0, os.SEEK_END)
+                tail_start = max(0, end - tail_bytes)
+                stream.seek(0)
+                offset = 0
+                # Buffered reads scan the snapshot once. Only the tail and possible
+                # planner and checkpoint rows outside it need JSON decoding.
+                while offset < end:
+                    line = stream.readline(end - offset)
+                    if not line:
+                        break
+                    in_tail = offset >= tail_start
+                    offset += len(line)
+                    if not in_tail and not any(
+                        marker in line for marker in (b"CHECKPOINT", b"PLANNER_RESPONSE", b"\\u")
+                    ):
+                        continue
+                    if not line.strip():
+                        continue
+                    row = _parse_transcript_row(line)
+                    if row is None:
+                        malformed += in_tail
+                        continue
+                    kind = row.get("type", row.get("step_type", row.get("stepType", row.get("event"))))
+                    if kind == "CHECKPOINT":
+                        checkpoints += 1
+                        planner = planner_index = None
+                        last_model = ""
+                        recent_models.clear()
+                    index = row.get("step_index", row.get("stepIndex", row.get("index")))
+                    if in_tail and type(index) is int:
+                        step_index = index
+                    if kind == "PLANNER_RESPONSE":
+                        planner = row
+                        planner_index = index if type(index) is int else None
+                        model = row.get("model")
+                        last_model = model if isinstance(model, str) else ""
+                        if last_model.strip():
+                            recent_models[last_model] = None
+    except (OSError, ValueError):
+        pass
+
+    input_tokens, cache_read_tokens, output_tokens = _planner_tokens(planner) if planner is not None else (0, 0, 0)
+    return TranscriptTelemetry(
+        transcript_path=path,
+        exists=exists,
+        active_tokens=input_tokens + cache_read_tokens,
+        input_tokens=input_tokens,
+        cache_read_tokens=cache_read_tokens,
+        output_tokens=output_tokens,
+        active_model=last_model,
+        recent_models=tuple(recent_models),
+        checkpoint_count=checkpoints,
+        checkpoint_epoch=checkpoints,
+        last_step_index=step_index,
+        last_planner_step_index=planner_index,
+        malformed_lines=malformed,
+    )
+
+
+def resolve_model_context_limit(models: Iterable[str], cfg: Mapping[str, object]) -> int:
+    rules = cfg["context_limit_rules"]
+    limits = []
+    for model in models:
+        if not model.strip():
+            continue
+        for rule in rules:
+            if re.search(rule["pattern"], model, re.IGNORECASE):
+                limits.append(int(rule["limit"]))
+                break
+    return min(limits, default=int(cfg["default_context_limit"]))
+
+
+def resolve_model_tier_fallback(model_id: str, cfg: Mapping[str, object]) -> str:
+    for rule in cfg["model_tier_fallbacks"]:
+        if re.search(rule["pattern"], model_id, re.IGNORECASE):
+            return rule["tier"]
+    return "flash"
+
+
+def evaluate_context_band(
+    telemetry: TranscriptTelemetry, cfg: Mapping[str, object], *, model_hint: str = ""
+) -> ContextAssessment:
+    models = telemetry.recent_models
+    if not models and model_hint and model_hint.lower() != "auto":
+        models = (model_hint,)
+    limit = resolve_model_context_limit(models, cfg)
+    soft = cfg.get("soft_tokens_override") or min(int(cfg["soft_cap_tokens"]), int(limit * float(cfg["soft_ratio"])))
+    hard = cfg.get("hard_tokens_override") or min(int(cfg["hard_cap_tokens"]), int(limit * float(cfg["hard_ratio"])))
+    soft = max(1, int(soft))
+    hard = max(soft, int(hard))
+    emergency = max(hard, int(limit * float(cfg["emergency_ratio"])))
+    active = telemetry.active_tokens
+
+    band = "ok"
+    for threshold, name in ((emergency, "emergency"), (hard, "hard"), (soft, "soft")):
+        if active >= threshold:
+            band = name
+            break
+    return ContextAssessment(
+        active_tokens=active,
+        context_limit=limit,
+        utilization_ratio=active / limit,
+        soft_threshold=soft,
+        hard_threshold=hard,
+        emergency_threshold=emergency,
+        band=band,
+        checkpoint_count=telemetry.checkpoint_count,
+        checkpoint_epoch=telemetry.checkpoint_epoch,
+        checkpoint_fatigue=telemetry.checkpoint_count >= int(cfg["checkpoint_fatigue_count"]),
+        headroom_to_auto_compact=max(0, int(limit * 0.85) - active),
+        active_model=telemetry.active_model,
+        recent_models=telemetry.recent_models,
+    )
+
+
+def handoff_state_dir(environ: Mapping[str, str] | None = None) -> Path:
+    source = os.environ if environ is None else environ
+    plugin_data = source.get("PLUGIN_DATA", "").strip()
+    app_data = source.get("ANTIGRAVITY_APP_DATA_DIR", "").strip()
+    if plugin_data:
+        path = Path(plugin_data).expanduser() / "handoff_state"
+    elif app_data:
+        path = Path(app_data).expanduser() / "plugin_data" / "codex-orchestrator" / "handoff_state"
+    else:
+        path = Path("/tmp/codex-orchestrator/handoff-state")
+    return ensure_private_dir(path)
+
+
+def state_file_path(conversation_id: str, *, environ: Mapping[str, str] | None = None) -> Path:
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", conversation_id.strip())
+    if name in ("", ".", ".."):
+        raise ValueError("invalid conversation ID")
+    return handoff_state_dir(environ) / f"{name}.json"
+
+
+def hash_user_input(text: str) -> str:
+    if isinstance(text, str) and text.strip():
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+    return ""
+
+
+def chain_position_from_tags(tags: object) -> dict[str, str | int]:
+    position = {}
+    if isinstance(tags, list):
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            key, _, value = tag.partition(":")
+            if key == "chain" and re.fullmatch(r"[A-Za-z0-9_.-]+", value) and value not in (".", ".."):
+                position["chain_id"] = value
+            elif key == "hop" and re.fullmatch(r"[0-9]{1,18}", value) and int(value) > 0:
+                position["hop_index"] = int(value)
+    return position
+
+
+@contextmanager
+def conversation_state_lock(
+    conversation_id: str, *, environ: Mapping[str, str] | None = None
+) -> Iterator[None]:
+    path = state_file_path(conversation_id, environ=environ)
+    lock_path = path.with_name(path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def load_conversation_state(
+    conversation_id: str, *, environ: Mapping[str, str] | None = None
+) -> dict:
+    try:
+        path = state_file_path(conversation_id, environ=environ)
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    for prefix in ("last_seen_user", "handed_off_turn"):
+        key = f"{prefix}_input"
+        if key in state:
+            state.setdefault(f"{prefix}_hash", hash_user_input(state.pop(key)))
+            if prefix == "handed_off_turn" and state.get("handed_off") is True:
+                state.setdefault("post_handoff_turn_active", True)
+    return state
+
+
+def save_conversation_state(
+    conversation_id: str, state: Mapping[str, object], *, environ: Mapping[str, str] | None = None
+) -> Path:
+    path = state_file_path(conversation_id, environ=environ)
+    stream = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
+    )
+    temporary = Path(stream.name)
+    try:
+        with stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(dict(state), stream, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def update_conversation_state(
+    conversation_id: str, updater: Callable[[dict], T], *, environ: Mapping[str, str] | None = None
+) -> tuple[dict, T]:
+    with conversation_state_lock(conversation_id, environ=environ):
+        state = load_conversation_state(conversation_id, environ=environ)
+        result = updater(state)
+        save_conversation_state(conversation_id, state, environ=environ)
+        return state, result

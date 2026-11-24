@@ -1,6 +1,10 @@
-# Codex Orchestrator (`v3.5.1`)
+# Codex Orchestrator (`v3.6.0`)
 
-A **Dual-Brain** orchestration plugin for **Google Antigravity** pairing **Gemini** (Principal Manager, Corpus Collector & Verifier) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across software engineering (`/impl`, `/review`, `/dag`) and deep research / red-team debate / experiment analysis (`/research`, `/debate`, `/analyze`).
+A **Dual-Brain** orchestration plugin for **Google Antigravity** pairing **Gemini** (Principal Manager, Corpus Collector & Verifier) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across software engineering (`/impl`, `/review`, `/dag`), long-horizon session continuity (`/handoff`), and deep research / red-team debate / experiment analysis (`/research`, `/debate`, `/analyze`).
+
+## What's New in `v3.6.0`
+
+* **Native Antigravity Session Handoff (`/handoff`, `handoff.sh`)**: Adds zero-dependency context telemetry (`context_telemetry.py`), native `PreInvocation` + `Stop` watermark hooks (`codex-context-handoff` via `hook_context_guard.py`), and a lossless 9-section Handoff Packet + `product.v1.ConversationService` relay engine (`handoff.py`) with dual-constraint model-aware thresholds (`Soft = min(200K, 45% × cpLimit)`, `Hard = min(300K, 65% × cpLimit)`), `projectId`/`environmentId`/`conversationGroupId`/model preservation with tier fallback, anti-split-brain & `max_hops` circuit breakers, and exit `7` graceful fallback when local RPC is sandbox-blocked.
 
 ## What's New in `v3.5.1`
 
@@ -26,13 +30,13 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.5.1`) and icon (`agy plugin validate --strict` clean) |
-| `SPEC.md` | Behavioral specification (`v3.5`) for Session/Hands exit codes, patch custody, Proof-of-Work, and TDD |
-| `hooks.json` | Root `PreToolUse` hook registration (`codex-delegate-guard`, `strict` default + `pragmatic` opt-in) |
-| `rules/AGENTS.md` | Lean (`<= 30` lines) always-on Fold-First ladder, guardrails, and Communication Charter v3.1 pointer |
+| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.6.0`) and icon (`agy plugin validate --strict` clean) |
+| `SPEC.md` | Behavioral specification (`v3.6`) for Session/Hands exit codes, patch custody, Proof-of-Work, TDD, and Session Handoff |
+| `hooks.json` | Root `PreToolUse` (`codex-delegate-guard`) and `PreInvocation` + `Stop` (`codex-context-handoff`) lifecycle hook registrations |
+| `rules/AGENTS.md` | Lean (`<= 30` lines) always-on Fold-First ladder, guardrails, handoff policy, and Communication Charter v3.1 pointer |
 | `agents/codex-worker.md` | Context-compression subagent (`inheritMcp: false`) for multi-round repair, SSH/GPU checks, and `/run-workflow` |
-| `skills/codex-orchestrator/config/profiles.json` | Declarative model, effort, speed, command-budget, and schema routing table |
-| `skills/codex-orchestrator/scripts/` | Thin shims (`run_codex.sh`, `run_codex_parallel.sh`, `hook_delegate_guard.py`) + zero-dependency `codex_orch/` Python package |
+| `skills/codex-orchestrator/config/profiles.json` | Declarative model, effort, speed, command-budget, schema, and `context_handoff` threshold routing table |
+| `skills/codex-orchestrator/scripts/` | Thin shims (`run_codex.sh`, `run_codex_parallel.sh`, `handoff.sh`, `hook_delegate_guard.py`, `hook_context_guard.py`) + zero-dependency `codex_orch/` Python package |
 | `skills/codex-orchestrator/workflows/` | Reusable Antigravity `/run-workflow` read-only templates (`research_parallel.py`, `debate_multi_critic.py`) |
-| `skills/codex-orchestrator/references/` | 4 strict JSON schemas, Spec templates, and Communication Charter (`user-brief-template.md`) |
-| `tests/test_plugin.py` | Zero-dependency conformance suite covering `v3.2` + `v3.5` contracts |
+| `skills/codex-orchestrator/references/` | 4 strict JSON schemas, Spec & Handoff Packet templates, and Communication Charter (`user-brief-template.md`) |
+| `tests/` | Zero-dependency conformance suites (`test_plugin.py`, `test_handoff.py`) covering `v3.2` + `v3.5` + `v3.6` contracts |

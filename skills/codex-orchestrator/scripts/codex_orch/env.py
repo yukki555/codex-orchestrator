@@ -18,7 +18,10 @@ _PRESERVED_PREFIXES = ("LC_", "XDG_", "PYTHON", "CODEX_", "TEST_CODEX_")
 
 _URL_CREDENTIALS = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 _SECRET = re.compile(
-    r"(?i:Authorization|X-API-Key|x-codeium-csrf-token)\s*:\s*"
+    r"""(?i:(?<![\w-])(?:["']?x-antigravity-csrf-token["']?[ \t]*:|"""
+    r"""["']?ANTIGRAVITY_CSRF_TOKEN["']?[ \t]*[:=])[ \t]*"""
+    r"""(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'[^'\r\n]*'|[^\s,;}]+))"""
+    r"|(?i:Authorization|X-API-Key|x-codeium-csrf-token)\s*:\s*"
     r"(?:(?i:Bearer|Basic)\s+[^\s,;]+|\S+)"
     r"|(?i:Bearer)\s+[A-Za-z0-9._~+/=-]{8,}"
     r"|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+"
@@ -49,13 +52,12 @@ def ensure_private_dir(path: str | Path) -> Path:
 def build_child_env(
     base_env: Mapping[str, str] | None = None, *, inherit_all: bool = False
 ) -> dict[str, str]:
-    if inherit_all:
-        return dict(base_env or os.environ)
-    source = os.environ if base_env is None else base_env
+    source = os.environ if base_env is None or (inherit_all and not base_env) else base_env
     return {
         key: value
         for key, value in source.items()
-        if key in _PRESERVED_KEYS or key.startswith(_PRESERVED_PREFIXES)
+        if not key.startswith("ANTIGRAVITY_")
+        and (inherit_all or key in _PRESERVED_KEYS or key.startswith(_PRESERVED_PREFIXES))
     }
 
 

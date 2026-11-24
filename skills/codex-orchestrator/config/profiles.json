@@ -1,5 +1,5 @@
 {
-  "version": "3.5.1",
+  "version": "3.6.0",
   "valid_modes": ["consult", "implement", "review", "resume", "research", "critique", "analyze"],
   "valid_efforts": ["low", "medium", "high", "xhigh", "max", "ultra", "inherit"],
   "valid_speeds": ["default", "fast", "ultrafast", "inherit"],
@@ -49,5 +49,28 @@
     "supports_ultrafast": true,
     "low_medium_speed": "fast",
     "high_speed": "default"
+  },
+  "context_handoff": {
+    "default_mode": "propose",
+    "soft_ratio": 0.45,
+    "soft_cap_tokens": 200000,
+    "hard_ratio": 0.65,
+    "hard_cap_tokens": 300000,
+    "emergency_ratio": 0.80,
+    "checkpoint_fatigue_count": 2,
+    "max_hops": 5,
+    "default_context_limit": 160000,
+    "context_limit_rules": [
+      {"pattern": "^gemini[-_ ]4[-_ ](?:neon|hydrogen|carbon|argon)|^gemini[-_ ]pro[-_ ]orchestrator|^gemini[-_ ]flash[-_ ]worker|^orchestrator", "limit": 512000},
+      {"pattern": "claude[-_ ](?:opus|sonnet)[-_ ]5[._-]5|^gemini[-_ ]3[._-]8[-_ ]flash", "limit": 256000},
+      {"pattern": "claude[-_ ](?:opus|sonnet)[-_ ]4[._-]6", "limit": 160000},
+      {"pattern": "^gemini[-_ ]3[._-]1[-_ ]pro|^gemini[-_ ]pro", "limit": 128000},
+      {"pattern": "gpt[-_ ]oss", "limit": 80000}
+    ],
+    "model_tier_fallbacks": [
+      {"pattern": "neon|carbon|argon|opus|orchestrator|pro", "tier": "pro"},
+      {"pattern": "lite", "tier": "flash_lite"},
+      {"pattern": ".*", "tier": "flash"}
+    ]
   }
 }

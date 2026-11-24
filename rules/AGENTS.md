@@ -13,6 +13,7 @@ Pair **Gemini** (Manager, Corpus Collector, Verifier) with **local Codex CLI** (
 * **Code Delegation (`PreToolUse` `codex-delegate-guard`)**: New code files and edits over the active guard limit MUST go through Codex (`run_codex.sh` / `/impl` / `/dag`) unless the user explicitly opts out (`不用codex`, `skip codex`, `你直接改`). In `/plan`, plan around Spec -> Codex -> layered verification.
 * **Local-Only & Anti-Bloat**: Keep Codex local-only and offline by default (`corpus/` frozen by Gemini outside Codex). Reserve `resume` for healthy short loops (`< 1,000,000` prior `tokens.input`, non-timeout); otherwise start a fresh `implement` run.
 * **Self-Hosting Safety**: Never run `implement` in-place against this plugin's own script directory; use `--worktree` or a frozen `/tmp` script copy.
+* **Context Handoff (`codex-context-handoff` / `/handoff`)**: Respect single-shot Soft/Hard context watermarks (`min(200K, 45%)` / `min(300K, 65%)` of model `cpLimit`). Wait for active subagents/background jobs before running `handoff.sh create`; once handoff succeeds, stop mutating the workspace and emit only the final Chinese receipt.
 * **Read Before Orchestrating**: Load `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md` for full flags, DAG contracts, and routing tables (details intentionally kept out of this always-on rule).
 
 ## Mandatory Communication Charter (v3.1)

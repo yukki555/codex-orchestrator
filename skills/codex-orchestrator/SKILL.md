@@ -7,9 +7,9 @@ description: >-
   and loose composition with /swarm and /run-workflow.
 ---
 
-# Codex Orchestrator (v3.5)
+# Codex Orchestrator (v3.6)
 
-Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity built around a decoupled **Brain (`rules/`, `skills/`, `workflows/`) / Session (`SPEC.md` + immutable `attempts/attempt-NNN/` artifacts) / Hands (`codex_orch/` Python kernel + `config/profiles.json` + thin `.sh` shims)** architecture.
+Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity built around a decoupled **Brain (`rules/`, `skills/`, `workflows/`) / Session (`SPEC.md` + immutable `attempts/attempt-NNN/` + `handoff/` packets) / Hands (`codex_orch/` Python kernel + `config/profiles.json` + thin `.sh` shims)** architecture.
 
 ## Fold-First Cost Ladder & Entry Points
 
@@ -49,6 +49,12 @@ See [`SPEC.md`](../../../SPEC.md) for the complete exit-code table (`0` ok, `2` 
 * **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` compacts `last_message.md > 4096` bytes into a UTF-8-safe preview with file pointers. Always `read_file` `last_message.md` / `summary.json` / `verification.json` when inspecting full details.
 * **Self-Hosting Safety**: Both `.sh` shims invoke `exec python3 -I -B` and refuse in-place `implement` targeting `scripts/` without `--worktree`.
 
+## Context Telemetry & Native Session Handoff (`/handoff`, `v3.6`)
+
+* **Dual-Constraint Performance Thresholds (`config/profiles.json` `context_handoff`)**: Resolves Antigravity platform truncation limits (`cpLimit`: Gemini 4 / Orchestrator `512K`, Claude 5.5 / Gemini 3.8 `256K`, Claude 4.6 `160K`, Gemini 3.1 Pro `128K`, GPT-OSS `80K`; Orchestrator dual-model threads take the conservative minimum) and computes `Soft = min(200K, 45% × cpLimit)`, `Hard = min(300K, 65% × cpLimit)`, and `Emergency = 80% × cpLimit` (overridable via `CODEX_HANDOFF_*` env vars).
+* **Native Lifecycle Hook (`codex-context-handoff` in `hooks.json`)**: Fail-open `PreInvocation` + `Stop` guard (`hook_context_guard.py`, `timeout: 5s`) shares `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/codex-orchestrator/handoff_state` with `handoff.sh`, skips child subagents, resets on `/compact` (`checkpoint_epoch`), fires each band at most once per epoch (omitting `systemMessage.metadata` by default to avoid Antigravity `v2.35.1`'s `ScrubInternalFields` map panic; opt in via `CODEX_HANDOFF_HOOK_METADATA=1`), guards against post-handoff split-brain edits, and supports `CODEX_HANDOFF_MODE=propose|auto|off` (`propose` default; `Stop` nudge active only in `auto` mode with `fullyIdle == true` and `continuationActive == false`).
+* **Lossless Handoff CLI (`scripts/handoff.sh`)**: `inspect` reads live transcript telemetry; `validate` & `create` enforce the 8-section Handoff Packet contract (`references/handoff-packet-template.md`), verify referenced paths & Git conflict-free status, redact/block secrets, append deterministic `## 9. Deterministic Runtime Snapshot`, preserve `projectId` / `environmentId` / `conversationGroupId` / active model (with tier fallback), enforce `max_hops` and per-epoch idempotency, and fall back cleanly with exit `7` (`ls_api_unreachable`) if local LS RPC is sandbox-blocked.
+
 ## Layered Verification & Communication Charter (`v3.1`)
 
 Before replying after any Codex run:
@@ -82,6 +88,14 @@ SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/sc
   --mode implement --structured --max-parallel 3 --timeout 240 \
   --verify-preset unit --dir "/path/to/repo" \
   --manifest /tmp/codex-orchestrator/topic-1/manifest.json
+
+# 4. Inspect live context health or launch a lossless successor conversation
+"$SCRIPTS/handoff.sh" inspect
+"$SCRIPTS/handoff.sh" create \
+  --packet /tmp/codex-orchestrator/topic-1/handoff-draft.md \
+  --workspace "/path/to/repo" \
+  --artifact-dir /tmp/codex-orchestrator/topic-1 \
+  --resume-mode auto
 ```
 
 Never print, inspect, or log `~/.codex/auth.json` or API keys.

@@ -12,5 +12,21 @@
         ]
       }
     ]
+  },
+  "codex-context-handoff": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 ./skills/codex-orchestrator/scripts/hook_context_guard.py",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./skills/codex-orchestrator/scripts/hook_context_guard.py",
+        "timeout": 5
+      }
+    ]
   }
 }

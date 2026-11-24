@@ -67,11 +67,18 @@ def _deny(reason: str) -> dict[str, str]:
 def is_safe_temp_or_config_path(path_str: str) -> bool:
     # realpath resolves symlinks in the existing prefix, even for a new file.
     path = Path(os.path.realpath(os.path.expanduser(path_str)))
+    gemini_dir = Path.home() / ".gemini"
+    brain_roots = [gemini_dir / host / "brain" for host in (
+        "antigravity", "antigravity-cli", "antigravity-ide",
+    )]
+    app_data_dir = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+    if app_data_dir:
+        brain_roots.append(Path(app_data_dir).expanduser() / "brain")
     safe_roots = (
         Path(os.path.realpath("/tmp")) / "codex-orchestrator",
         Path("/tmp/codex-orchestrator"),
         Path("/private/tmp/codex-orchestrator"),
-        Path(os.path.realpath(os.path.expanduser("~/.gemini/antigravity/brain"))),
+        *(Path(os.path.realpath(root)) for root in brain_roots),
     )
     return any(path == root or root in path.parents for root in safe_roots)
 

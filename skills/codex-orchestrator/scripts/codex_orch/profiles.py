@@ -4,7 +4,46 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
+
+
+DEFAULT_CONTEXT_HANDOFF: dict = {
+    "default_mode": "propose",
+    "soft_ratio": 0.45,
+    "soft_cap_tokens": 200000,
+    "hard_ratio": 0.65,
+    "hard_cap_tokens": 300000,
+    "emergency_ratio": 0.80,
+    "checkpoint_fatigue_count": 2,
+    "max_hops": 5,
+    "default_context_limit": 160000,
+    "context_limit_rules": [
+        {
+            "pattern": (
+                "^gemini[-_ ]4[-_ ](?:neon|hydrogen|carbon|argon)"
+                "|^gemini[-_ ]pro[-_ ]orchestrator|^gemini[-_ ]flash[-_ ]worker|^orchestrator"
+            ),
+            "limit": 512000,
+        },
+        {
+            "pattern": "claude[-_ ](?:opus|sonnet)[-_ ]5[._-]5|^gemini[-_ ]3[._-]8[-_ ]flash",
+            "limit": 256000,
+        },
+        {"pattern": "claude[-_ ](?:opus|sonnet)[-_ ]4[._-]6", "limit": 160000},
+        {"pattern": "^gemini[-_ ]3[._-]1[-_ ]pro|^gemini[-_ ]pro", "limit": 128000},
+        {"pattern": "gpt[-_ ]oss", "limit": 80000},
+    ],
+    "model_tier_fallbacks": [
+        {"pattern": "neon|carbon|argon|opus|orchestrator|pro", "tier": "pro"},
+        {"pattern": "lite", "tier": "flash_lite"},
+        {"pattern": ".*", "tier": "flash"},
+    ],
+}
+_HANDOFF_MODES = ("propose", "auto", "off")
+_MODEL_TIERS = ("pro", "flash", "flash_lite")
 
 
 def default_profiles_path(script_dir: Path | None = None) -> Path:
@@ -14,6 +53,43 @@ def default_profiles_path(script_dir: Path | None = None) -> Path:
 
 def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _positive_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _validate_context_handoff(config: object) -> None:
+    if not isinstance(config, dict):
+        raise ValueError("context_handoff must be an object")
+    if config.get("default_mode") not in _HANDOFF_MODES:
+        raise ValueError("invalid context_handoff.default_mode")
+    soft, hard, emergency = (config.get(key) for key in ("soft_ratio", "hard_ratio", "emergency_ratio"))
+    if (any(type(value) not in (float, int) for value in (soft, hard, emergency))
+            or not 0 < soft < hard < emergency <= 1):
+        raise ValueError("context_handoff ratios must increase from soft to hard to emergency within (0, 1]")
+    for key in ("soft_cap_tokens", "hard_cap_tokens", "checkpoint_fatigue_count", "max_hops",
+                "default_context_limit"):
+        if not _positive_int(config.get(key)):
+            raise ValueError(f"context_handoff.{key} must be a positive integer")
+    if config["soft_cap_tokens"] > config["hard_cap_tokens"]:
+        raise ValueError("context_handoff.soft_cap_tokens must not exceed hard_cap_tokens")
+
+    for key in ("context_limit_rules", "model_tier_fallbacks"):
+        rules = config.get(key)
+        if not isinstance(rules, list) or not rules:
+            raise ValueError(f"context_handoff.{key} must be a non-empty list")
+        for rule in rules:
+            if not isinstance(rule, dict) or not isinstance(rule.get("pattern"), str):
+                raise ValueError(f"context_handoff.{key} must contain objects with regex patterns")
+            try:
+                re.compile(rule["pattern"], re.IGNORECASE)
+            except (re.error, OverflowError, RecursionError) as exc:
+                raise ValueError(f"invalid regex in context_handoff.{key}") from exc
+            if key == "context_limit_rules" and not _positive_int(rule.get("limit")):
+                raise ValueError("context_handoff context limit must be a positive integer")
+            if key == "model_tier_fallbacks" and rule.get("tier") not in _MODEL_TIERS:
+                raise ValueError("invalid context_handoff model tier")
 
 
 def _validate_profiles(profiles: dict) -> None:
@@ -66,6 +142,44 @@ def _validate_profiles(profiles: dict) -> None:
             downgrade = capability.get("downgrade_ultrafast_to")
             if downgrade not in speeds or downgrade == "ultrafast":
                 raise ValueError("invalid model ultrafast downgrade speed")
+
+    if "context_handoff" in profiles:
+        _validate_context_handoff(profiles["context_handoff"])
+
+
+def resolve_context_handoff_config(
+    profiles: dict | None = None, *, environ: Mapping[str, str] | None = None
+) -> dict:
+    source = os.environ if environ is None else environ
+    config = deepcopy({**DEFAULT_CONTEXT_HANDOFF, **((profiles or {}).get("context_handoff") or {})})
+
+    mode = source.get("CODEX_HANDOFF_MODE", "").strip().lower()
+    config["mode"] = mode if mode in _HANDOFF_MODES else config["default_mode"]
+    config["archive_old"] = source.get("CODEX_HANDOFF_ARCHIVE_OLD", "").strip().lower() in ("1", "true", "yes")
+    config["hook_metadata"] = source.get("CODEX_HANDOFF_HOOK_METADATA", "").strip().lower() in ("1", "true", "yes")
+    config["model_override"] = source.get("CODEX_HANDOFF_MODEL", "").strip()
+    config["soft_tokens_override"] = config["hard_tokens_override"] = None
+
+    for suffix, key in (
+        ("SOFT_TOKENS", "soft_tokens_override"),
+        ("HARD_TOKENS", "hard_tokens_override"),
+        ("MAX_HOPS", "max_hops"),
+    ):
+        try:
+            value = int(source.get(f"CODEX_HANDOFF_{suffix}", ""))
+        except ValueError:
+            continue
+        if value > 0:
+            config[key] = value
+
+    for suffix, key in (("SOFT_RATIO", "soft_ratio"), ("HARD_RATIO", "hard_ratio")):
+        try:
+            ratio = float(source.get(f"CODEX_HANDOFF_{suffix}", ""))
+        except ValueError:
+            continue
+        if 0 < ratio < 1:
+            config[key] = ratio
+    return config
 
 
 def load_profiles(path: str | Path | None = None, *, script_dir: Path | None = None) -> dict:

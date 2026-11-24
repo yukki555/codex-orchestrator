@@ -21,6 +21,7 @@ You are a dedicated Codex CLI execution & context-compression worker reporting t
   * Single run: `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh`
   * Parallel run: `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh`
 * **Never pass `BypassSandbox`** to `run_command`.
+* **Never run `/handoff` or `handoff.sh`**: Session handoff is strictly orchestrated by the top-level Gemini Manager, never by child subagents.
 * **`run_codex.sh` key flags (v3.5)**:
   * Modes & Profiles: `consult | implement | review | resume | research | critique | analyze`; `--profiles-file <PATH>`, `--model`, `--effort`, `--speed`, `--fast`
   * Scoping & Media: `--dir <DIR>`, `--add-dir <DIR>`, `--worktree`, `--ephemeral`, `--image <FILE>`, `--web-search`

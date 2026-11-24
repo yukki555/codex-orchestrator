@@ -1,8 +1,8 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.5): pure-Python codex_orch kernel with declarative profiles, verified patch custody, host-side Proof-of-Work, opt-in cross-model TDD, and loose composition with /swarm and /run-workflow.",
-  "version": "3.5.1",
+  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.6): pure-Python codex_orch kernel with declarative profiles, verified patch custody, host-side Proof-of-Work, opt-in cross-model TDD, native context-watermark session handoff (/handoff), and loose composition with /swarm and /run-workflow.",
+  "version": "3.6.0",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [

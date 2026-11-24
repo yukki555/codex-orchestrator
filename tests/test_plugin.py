@@ -29,9 +29,11 @@ PROFILES = CORE_SKILL / "config" / "profiles.json"
 REFERENCES = CORE_SKILL / "references"
 SCRIPTS = CORE_SKILL / "scripts"
 GUARD = SCRIPTS / "hook_delegate_guard.py"
+CONTEXT_GUARD = SCRIPTS / "hook_context_guard.py"
+HANDOFF_SH = SCRIPTS / "handoff.sh"
 RULES = ROOT / "rules" / "AGENTS.md"
 AGENT = ROOT / "agents" / "codex-worker.md"
-SKILL_NAMES = ("codex-orchestrator", "impl", "review", "dag", "research", "debate", "analyze")
+SKILL_NAMES = ("codex-orchestrator", "impl", "review", "dag", "research", "debate", "analyze", "handoff")
 
 
 class AntigravityPluginTests(unittest.TestCase):
@@ -91,7 +93,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
         self.assertEqual(plugin["displayName"], "Codex Orchestrator")
-        self.assertEqual(plugin["version"], "3.5.1")
+        self.assertEqual(plugin["version"], "3.6.0")
         self.assertEqual(json.loads(PROFILES.read_text(encoding="utf-8"))["version"], plugin["version"])
         self.assertEqual(plugin["logo"], "assets/logo.svg")
         self.assertTrue((ROOT / plugin["logo"]).is_file())
@@ -115,7 +117,16 @@ class AntigravityPluginTests(unittest.TestCase):
                     ),
                     f"No PreToolUse matcher routes {tool} to {guard_path}",
                 )
-        for shim in (GUARD, SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh"):
+        context_hooks = hooks["codex-context-handoff"]
+        self.assertEqual(set(context_hooks), {"PreInvocation", "Stop"})
+        context_guard_path = "./" + CONTEXT_GUARD.relative_to(ROOT).as_posix()
+        for event, entries in context_hooks.items():
+            with self.subTest(event=event):
+                self.assertTrue(any(
+                    hook["type"] == "command" and context_guard_path in hook["command"].split()
+                    for hook in entries
+                ))
+        for shim in (GUARD, CONTEXT_GUARD, HANDOFF_SH, SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh"):
             self.assertEqual(stat.S_IMODE(shim.stat().st_mode), 0o755, shim)
 
     def test_all_output_schemas_are_strict(self):
@@ -177,7 +188,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertNotIn("edit_file", agent["tools"])
         self.assertNotIn("replace", agent["tools"])
 
-    def test_seven_skills_valid_and_no_stale_templates(self):
+    def test_eight_skills_valid_and_no_stale_templates(self):
         skill_files = [SKILLS / name / "SKILL.md" for name in SKILL_NAMES]
         for path in skill_files:
             with self.subTest(frontmatter=path.relative_to(ROOT)):
@@ -191,6 +202,7 @@ class AntigravityPluginTests(unittest.TestCase):
             *skill_files, RULES, AGENT, ROOT / "README.md",
             REFERENCES / "user-brief-template.md",
             REFERENCES / "research-spec-template.md",
+            REFERENCES / "handoff-packet-template.md",
         ]:
             with self.subTest(stale_syntax=path.relative_to(ROOT)):
                 content = path.read_text(encoding="utf-8")
@@ -210,7 +222,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 "深度调研 / 红队辩论 / 实验核查",
             ),
             RULES: ("Communication Charter", "Dynamic Structure Routing", charter.name),
-            ROOT / "README.md": ("v3.5.1", "Communication Charter v3.1", charter.name),
+            ROOT / "README.md": ("v3.6.0", "Communication Charter v3.1", charter.name),
             SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.1", charter.name),
             SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.1", "lightweight route", charter.name),
             SKILLS / "review" / "SKILL.md": ("Communication Charter v3.1", "review", charter.name),
@@ -218,6 +230,7 @@ class AntigravityPluginTests(unittest.TestCase):
             SKILLS / "research" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
             SKILLS / "debate" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
             SKILLS / "analyze" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
+            SKILLS / "handoff" / "SKILL.md": ("Communication Charter v3.1", charter.name),
         }
         paths = list(required_markers)
         for path in paths:
@@ -230,12 +243,12 @@ class AntigravityPluginTests(unittest.TestCase):
                     self.assertNotIn(marker, content)
 
     def test_scripts_syntax_and_no_personal_paths(self):
-        for script in ("run_codex.sh", "run_codex_parallel.sh"):
+        for script in ("run_codex.sh", "run_codex_parallel.sh", HANDOFF_SH.name):
             with self.subTest(script=script):
                 self._run(["bash", "-n", str(SCRIPTS / script)])
         modules = sorted((SCRIPTS / "codex_orch").glob("*.py"))
         self.assertTrue(modules)
-        for path in (GUARD, *modules):
+        for path in (GUARD, CONTEXT_GUARD, *modules):
             compile(path.read_bytes(), path.name, "exec")
         for name in ("research_parallel.py", "debate_multi_critic.py"):
             path = CORE_SKILL / "workflows" / name
