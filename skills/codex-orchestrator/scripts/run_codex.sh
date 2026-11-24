@@ -3,13 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-run_codex.sh v2.1.0
+run_codex.sh v3.0.0
 
 Usage:
   run_codex.sh consult   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
   run_codex.sh implement --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
   run_codex.sh review    --dir <DIR> [--uncommitted | --base <BRANCH> | --commit <SHA>] [--spec <FILE> | --prompt <TEXT>] [options]
   run_codex.sh resume    --dir <DIR> (--id <SESSION_ID> | --last) (--spec <FILE> | --prompt <TEXT>) [--sandbox read-only|workspace-write] [options]
+  run_codex.sh research  --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
+  run_codex.sh critique  --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
+  run_codex.sh analyze   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
 
 Common options:
   --dir <DIR>            Target working directory (default: .)
@@ -30,15 +33,18 @@ Common options:
   --ignore-rules         Skip Codex rules files (default)
   --use-rules            Load rules files (mutually exclusive with --ignore-rules)
   --ephemeral            Run without persisting session files to disk
-  --worktree             Run in a managed Git worktree (consult/implement/review in git repos only)
+  --worktree             Run in a managed Git worktree (requires a Git repo, unavailable for resume)
   -c, --config <k=v>     Additional Codex TOML config override (repeatable)
   --timeout <SECONDS>    Kill Codex process group after N seconds and exit 124
   --max-cmds <N>         Prompt command budget (0 disables the footer)
-                        Defaults: consult/resume/read-only review=8, implement=12, native review=0
+                        Defaults: implement=12, research/analyze=10,
+                        consult/critique/resume/read-only review=8, native review=0
   --add-dir <DIR>        Additional writable directory for implement or workspace-write resume
                         Repeatable. Resume by ID inherits prior directories if omitted.
-  --structured           Enforce bundled JSON evidence schema (mutually exclusive with --schema)
+  --structured           Enforce the bundled JSON Schema for the mode (mutually exclusive with --schema)
   --schema <FILE>        JSON Schema file for --output-schema
+  -i, --image <FILE>     Attach a readable image file (repeatable)
+  --web-search           Enable live web search
   --out-dir <DIR>        Directory for artifacts (default: /tmp/codex-orchestrator/<mode>-<ts>-<pid>)
   -h, --help             Show this help message
 
@@ -47,11 +53,17 @@ Default model & effort routing (when --profile and --fast are not set):
   consult                gpt-6.2-astra / medium
   review                 gpt-6.2-astra / medium
   resume                 gpt-6.2-astra / medium
+  research               gpt-6.2-astra / medium
+  critique               gpt-6.2-astra / medium
+  analyze                gpt-6.2-astra / medium
 
 Mode-specific options:
+  research, critique, analyze:
+    Run in the read-only sandbox. --structured selects the research, critique,
+    or analysis output schema, respectively.
   review:
     Uses native review for a bare target (including --max-cmds 0).
-    Uses read-only exec with --spec, --prompt, --structured, --schema, or a positive command budget.
+    Uses read-only exec with --spec, --prompt, --structured, --schema, --image, or a positive command budget.
     --uncommitted    Review staged, unstaged, and untracked changes (default)
     --base <BRANCH>  Review changes against base branch
     --commit <SHA>   Review changes introduced by a commit
@@ -72,7 +84,7 @@ case "$1" in
     usage
     exit 0
     ;;
-  consult|implement|review|resume)
+  consult|implement|review|resume|research|critique|analyze)
     MODE="$1"
     shift
     ;;
@@ -113,9 +125,11 @@ TIMEOUT_S=0
 MAX_CMDS=0
 MAX_CMDS_SET=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_STRUCTURED_SCHEMA="$(cd "$SCRIPT_DIR/.." && pwd)/references/codex-output-schema.json"
+REF_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/references"
 STRUCTURED=false
 SCHEMA_FILE=""
+SCHEMA_SET=false
+WEB_SEARCH=false
 OUT_DIR=""
 REVIEW_TARGET=""
 REVIEW_ARG=""
@@ -126,6 +140,12 @@ RESUME_SANDBOX="read-only"
 declare -a REQUESTED_ADD_DIRS=()
 declare -a ADD_DIRS=()
 declare -a EXTRA_CONFIGS=()
+declare -a IMAGES=()
+
+canonical_file_path() {
+  # The trailing marker preserves newlines at the end of a path in command substitution.
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]), end=".")' "$1"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -267,7 +287,22 @@ while [[ $# -gt 0 ]]; do
     --schema)
       [[ $# -ge 2 ]] || { echo "Error: --schema requires a value" >&2; exit 2; }
       SCHEMA_FILE="$2"
+      SCHEMA_SET=true
       shift 2
+      ;;
+    -i|--image)
+      [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 2; }
+      if [[ ! -f "$2" || ! -r "$2" ]]; then
+        echo "Error: image file is missing or unreadable: $2" >&2
+        exit 2
+      fi
+      resolved_image="$(canonical_file_path "$2")"
+      IMAGES+=("${resolved_image%.}")
+      shift 2
+      ;;
+    --web-search)
+      WEB_SEARCH=true
+      shift
       ;;
     --out-dir)
       [[ $# -ge 2 ]] || { echo "Error: --out-dir requires a value" >&2; exit 2; }
@@ -368,20 +403,29 @@ if [[ -n "$SPEC_FILE" && ! -r "$SPEC_FILE" ]]; then
   exit 2
 fi
 
-if [[ "$STRUCTURED" == true && -n "$SCHEMA_FILE" ]]; then
+if [[ "$STRUCTURED" == true && "$SCHEMA_SET" == true ]]; then
   echo "Error: --structured and --schema are mutually exclusive" >&2
   exit 2
 fi
 
 if [[ "$STRUCTURED" == true ]]; then
-  if [[ ! -r "$DEFAULT_STRUCTURED_SCHEMA" ]]; then
-    echo "Error: bundled structured schema is missing or unreadable: $DEFAULT_STRUCTURED_SCHEMA" >&2
+  case "$MODE" in
+    research) SCHEMA_FILE="$REF_DIR/research-output-schema.json" ;;
+    critique) SCHEMA_FILE="$REF_DIR/critique-output-schema.json" ;;
+    analyze) SCHEMA_FILE="$REF_DIR/analysis-output-schema.json" ;;
+    *) SCHEMA_FILE="$REF_DIR/codex-output-schema.json" ;;
+  esac
+  if [[ ! -f "$SCHEMA_FILE" || ! -r "$SCHEMA_FILE" ]]; then
+    echo "Error: bundled structured schema is missing or unreadable: $SCHEMA_FILE" >&2
     exit 2
   fi
-  SCHEMA_FILE="$DEFAULT_STRUCTURED_SCHEMA"
-elif [[ -n "$SCHEMA_FILE" && ! -r "$SCHEMA_FILE" ]]; then
-  echo "Error: schema file is missing or unreadable: $SCHEMA_FILE" >&2
-  exit 2
+elif [[ "$SCHEMA_SET" == true ]]; then
+  if [[ ! -f "$SCHEMA_FILE" || ! -r "$SCHEMA_FILE" ]]; then
+    echo "Error: schema file is missing or unreadable: $SCHEMA_FILE" >&2
+    exit 2
+  fi
+  SCHEMA_FILE="$(canonical_file_path "$SCHEMA_FILE")"
+  SCHEMA_FILE="${SCHEMA_FILE%.}"
 fi
 
 if [[ "$MODE" != "review" && -z "$SPEC_FILE" && -z "$PROMPT_TEXT" ]]; then
@@ -435,6 +479,7 @@ fi
 if [[ "$MODE" == "review" ]]; then
   REVIEW_TARGET="${REVIEW_TARGET:-uncommitted}"
   if [[ "$STRUCTURED" == false && -z "$SCHEMA_FILE" && -z "$SPEC_FILE" && -z "$PROMPT_TEXT" &&
+        ${#IMAGES[@]} -eq 0 &&
         ( "$MAX_CMDS_SET" == false || "$MAX_CMDS" == 0 ) ]]; then
     REVIEW_ENGINE="native-review"
   else
@@ -445,6 +490,8 @@ fi
 if [[ "$MAX_CMDS_SET" == false ]]; then
   if [[ "$MODE" == "implement" ]]; then
     MAX_CMDS=12
+  elif [[ "$MODE" == "research" || "$MODE" == "analyze" ]]; then
+    MAX_CMDS=10
   elif [[ "$REVIEW_ENGINE" != "native-review" ]]; then
     MAX_CMDS=8
   fi
@@ -652,6 +699,13 @@ declare -a CMD=()
 SANDBOX_DESC=""
 
 build_codex_cmd() {
+  local -a prompt_args=()
+  local img
+  [[ -n "$SCHEMA_FILE" ]] && prompt_args+=("--output-schema" "$SCHEMA_FILE")
+  for img in ${IMAGES[@]+"${IMAGES[@]}"}; do
+    prompt_args+=("-i" "$img")
+  done
+
   COMMON_CFG=()
   if [[ "$NO_MCP" == true && "$IGNORE_USER_CONFIG" == false ]]; then
     COMMON_CFG+=("-c" "mcp_servers={}")
@@ -666,17 +720,24 @@ build_codex_cmd() {
   if [[ -n "$WRITABLE_ROOTS_TOML" ]]; then
     COMMON_CFG+=("-c" "sandbox_workspace_write.writable_roots=$WRITABLE_ROOTS_TOML")
   fi
+  if [[ "$WEB_SEARCH" == false ]]; then
+    COMMON_CFG+=("-c" 'web_search="disabled"')
+  fi
   if [[ ${#EXTRA_CONFIGS[@]} -gt 0 ]]; then
     for cfg in "${EXTRA_CONFIGS[@]}"; do
       COMMON_CFG+=("-c" "$cfg")
     done
   fi
 
-  CMD=("$CODEX_BIN" "exec")
+  if [[ "$WEB_SEARCH" == true ]]; then
+    CMD=("$CODEX_BIN" "--search" "exec")
+  else
+    CMD=("$CODEX_BIN" "exec")
+  fi
   SANDBOX_DESC=""
 
   case "$MODE:$REVIEW_ENGINE" in
-    consult:|review:read-only-exec)
+    consult:|research:|critique:|analyze:|review:read-only-exec)
       SANDBOX_DESC="read-only"
       CMD+=("-s" "read-only" "-C" "$TARGET_DIR")
       if [[ "$IS_GIT_REPO" == false ]]; then
@@ -691,8 +752,7 @@ build_codex_cmd() {
       if [[ ${#COMMON_CFG[@]} -gt 0 ]]; then
         CMD+=("${COMMON_CFG[@]}")
       fi
-      [[ -n "$SCHEMA_FILE" ]] && CMD+=("--output-schema" "$SCHEMA_FILE")
-      CMD+=("--json" "-o" "$LAST_MSG_FILE" "-")
+      CMD+=(${prompt_args[@]+"${prompt_args[@]}"} "--json" "-o" "$LAST_MSG_FILE" "-")
       ;;
     implement:)
       SANDBOX_DESC="workspace-write"
@@ -714,8 +774,7 @@ build_codex_cmd() {
           CMD+=("--add-dir" "$d")
         done
       fi
-      [[ -n "$SCHEMA_FILE" ]] && CMD+=("--output-schema" "$SCHEMA_FILE")
-      CMD+=("--json" "-o" "$LAST_MSG_FILE" "-")
+      CMD+=(${prompt_args[@]+"${prompt_args[@]}"} "--json" "-o" "$LAST_MSG_FILE" "-")
       ;;
     review:native-review)
       SANDBOX_DESC="review-default"
@@ -758,8 +817,7 @@ build_codex_cmd() {
       if [[ ${#COMMON_CFG[@]} -gt 0 ]]; then
         CMD+=("${COMMON_CFG[@]}")
       fi
-      [[ -n "$SCHEMA_FILE" ]] && CMD+=("--output-schema" "$SCHEMA_FILE")
-      CMD+=("--json" "-o" "$LAST_MSG_FILE")
+      CMD+=(${prompt_args[@]+"${prompt_args[@]}"} "--json" "-o" "$LAST_MSG_FILE")
       if [[ "$RESUME_LAST" == true ]]; then
         CMD+=("--last")
       else
@@ -865,7 +923,9 @@ python3 - \
   "$EFFECTIVE_SPEED" "$FAST_MODE" "$NO_MCP" "$IGNORE_USER_CONFIG" "$IGNORE_RULES" \
   "$STRUCTURED" "$EPHEMERAL" "$WORKTREE" "$REVIEW_ENGINE" \
   "$MAX_CMDS" "$TIMEOUT_S" "$START_MONO" "$END_MONO" \
-  "$TARGET_DIR" "$SANDBOX_DESC" "$OUT_DIR" "$LAST_MSG_FILE" ${ADD_DIRS[@]+"${ADD_DIRS[@]}"} <<'PY'
+  "$TARGET_DIR" "$SANDBOX_DESC" "$OUT_DIR" "$LAST_MSG_FILE" \
+  "$WEB_SEARCH" "$SCHEMA_FILE" "${#ADD_DIRS[@]}" \
+  ${ADD_DIRS[@]+"${ADD_DIRS[@]}"} ${IMAGES[@]+"${IMAGES[@]}"} <<'PY'
 import json
 import sys
 from collections import deque
@@ -877,8 +937,12 @@ from pathlib import Path
     speed, fast_preset_s, no_mcp_s, ignore_cfg_s, ignore_rules_s,
     structured_s, ephemeral_s, worktree_s, review_engine,
     max_cmds_s, timeout_s, start_s, end_s,
-    target_dir, sandbox_desc, out_dir, last_msg_p, *add_dirs
+    target_dir, sandbox_desc, out_dir, last_msg_p,
+    web_search_s, schema_file, add_dirs_count, *paths
 ) = sys.argv[1:]
+
+add_dirs = paths[:int(add_dirs_count)]
+images = paths[int(add_dirs_count):]
 
 events_path = Path(events_p)
 stderr_path = Path(stderr_p)
@@ -997,15 +1061,77 @@ else:
 
 duration_s = round(max(0.0, float(end_s) - float(start_s)), 3)
 cmd_output_kb = round(cmd_output_bytes / 1024.0, 2)
+
+
+def reject_json_constant(value):
+    raise ValueError(f"invalid JSON constant {value}")
+
+
+def json_equal(left, right):
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(json_equal(a, b) for a, b in zip(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(json_equal(left[k], right[k]) for k in left)
+    return left == right
+
+
+def matches_schema(value, schema):
+    if isinstance(schema, bool):
+        return schema
+    if not isinstance(schema, dict):
+        return False
+
+    value_type = type(value)
+    matches_type = {
+        "object": value_type is dict,
+        "array": value_type is list,
+        "string": value_type is str,
+        "integer": value_type is int or (value_type is float and value.is_integer()),
+        "number": value_type in (int, float),
+        "boolean": value_type is bool,
+        "null": value is None,
+    }
+    if "type" in schema:
+        types = schema["type"]
+        if not isinstance(types, list):
+            types = [types]
+        if not any(matches_type.get(name, False) for name in types):
+            return False
+    if "enum" in schema and not any(json_equal(value, item) for item in schema["enum"]):
+        return False
+
+    if isinstance(value, dict):
+        if not all(key in value for key in schema.get("required", [])):
+            return False
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties", True)
+        return all(matches_schema(item, properties.get(key, additional)) for key, item in value.items())
+    if isinstance(value, list) and "items" in schema:
+        return all(matches_schema(item, schema["items"]) for item in value)
+    return True
+
+
 last_msg_path = Path(last_msg_p)
 last_message_bytes = last_msg_path.read_bytes() if last_msg_path.is_file() else b""
 structured_valid = None
-if structured_s == "true" and status == "ok":
+structured_error = None
+if status == "ok" and (structured_s == "true" or schema_file):
     try:
-        json.loads(last_message_bytes.decode("utf-8"))
-        structured_valid = True
+        instance = json.loads(last_message_bytes.decode("utf-8"), parse_constant=reject_json_constant)
     except (ValueError, RecursionError):
-        structured_valid = False
+        structured_error = "is not valid JSON"
+    else:
+        if schema_file:
+            try:
+                schema = json.loads(Path(schema_file).read_text(encoding="utf-8"),
+                                    parse_constant=reject_json_constant)
+                if not matches_schema(instance, schema):
+                    structured_error = f"does not match the JSON Schema in {schema_file}"
+            except (OSError, ValueError, TypeError, RecursionError) as error:
+                structured_error = f"could not be validated against the JSON Schema in {schema_file}: {error}"
+    structured_valid = structured_error is None
 
 summary = {
     "status": status,
@@ -1022,6 +1148,9 @@ summary = {
     "ignore_rules": ignore_rules_s == "true",
     "structured": structured_s == "true",
     "structured_valid": structured_valid,
+    "schema_file": schema_file,
+    "web_search": web_search_s == "true",
+    "images": images,
     "ephemeral": ephemeral_s == "true",
     "worktree": worktree_s == "true",
     "review_engine": review_engine,
@@ -1059,14 +1188,15 @@ def print_field(key):
 
 
 for key in ("status", "exit_code", "mode", "model", "effort", "fast", "speed", "no_mcp",
-            "ignore_user_config", "ignore_rules", "structured"):
+            "ignore_user_config", "ignore_rules", "structured", "web_search"):
     print_field(key)
 if review_engine:
     print_field("review_engine")
 if structured_valid is not None:
     print_field("structured_valid")
-    if not structured_valid:
-        print("warning: --structured output in last_message.md is not valid JSON", file=sys.stderr)
+    if structured_error:
+        flag = "--structured" if structured_s == "true" else "--schema"
+        print(f"warning: {flag} output in last_message.md {structured_error}", file=sys.stderr)
 for key in ("duration_s", "commands", "cmd_output_kb"):
     print_field(key)
 print(f"tokens: in={tokens['input']} cached={tokens['cached']} out={tokens['output']} reason={tokens['reasoning']}")

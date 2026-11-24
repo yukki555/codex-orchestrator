@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-orchestrator v2.1.0
+# codex-orchestrator v3.0.0
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 
-MODES = ("consult", "implement", "review")
+MODES = ("consult", "implement", "review", "research", "critique", "analyze")
 SPEEDS = ("default", "fast", "ultrafast", "inherit")
 OVERRIDES = {
     "model": "--model",
@@ -28,23 +28,26 @@ OVERRIDES = {
     "max_cmds": "--max-cmds",
 }
 BOOLEAN_FLAGS = ("fast", "ephemeral", "structured", "ignore_rules", "use_rules",
-                 "ignore_user_config", "use_user_config", "no_mcp", "with_mcp")
+                 "ignore_user_config", "use_user_config", "no_mcp", "with_mcp", "web_search")
 MANIFEST_HELP = """Manifest schema
   A JSON array of tasks or an object containing a "tasks" array.
   name          Unique task name using A-Z, a-z, 0-9, dot, underscore or hyphen.
   spec          Spec file path, optional in the effective review mode.
   dir           Working directory.
-  mode          consult, implement or review.
+  mode          consult, implement, review, research, critique or analyze.
   model, effort, speed
                 String overrides for the corresponding worker flags.
   timeout       Positive integer seconds.
   max_cmds      Non-negative integer. Zero disables the worker command budget.
   add_dirs      Array of directory paths appended to CLI --add-dir values.
+  images        Array of image paths appended to CLI --image values.
   extra_configs Array of configuration strings appended to CLI -c values.
-  structured, ephemeral
+  schema        Custom output schema path overriding CLI --schema.
+  structured, ephemeral, web_search
                 Booleans overriding the corresponding worker flags.
-  Relative spec, dir and add_dirs paths use the current directory first,
-  then the manifest's parent directory. Other task fields default to CLI values.
+  Relative spec, dir, add_dirs, images and schema paths use the current
+  directory first, then the manifest's parent directory.
+  Other task fields default to CLI values.
 """
 
 
@@ -82,7 +85,7 @@ def argument_path(validate):
 def usage():
     parser = argparse.ArgumentParser(
         prog="run_codex_parallel.sh",
-        description="Run parallel Codex workers with v2.1.0 isolation and patch preflight.",
+        description="Run parallel Codex workers with v3.0.0 isolation and patch preflight.",
         epilog=MANIFEST_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
@@ -100,6 +103,9 @@ def usage():
     parser.add_argument("--speed", choices=SPEEDS, help="default worker speed tier")
     parser.add_argument("--fast", action="store_true", help="enable the worker fast preset")
     parser.add_argument("--ephemeral", action="store_true", help="use ephemeral worker sessions")
+    parser.add_argument("--web-search", action="store_true", help="enable web search for workers")
+    parser.add_argument("--image", type=argument_path(readable_file), action="append", default=[],
+                        metavar="FILE", help="attach an image to each worker prompt (repeatable)")
     parser.add_argument("--timeout", type=lambda value: integer(value, positive=True),
                         metavar="SECONDS", help="worker timeout in seconds")
     parser.add_argument("--max-cmds", type=integer, metavar="N",
@@ -223,7 +229,7 @@ def prepare_tasks(options, out_dir):
         try:
             mode = entry.get("mode", options.mode)
             if mode not in MODES:
-                raise ValueError("mode must be consult, implement, or review")
+                raise ValueError(f"mode must be one of {', '.join(MODES)}")
             if "spec" in entry:
                 spec = manifest_path(entry["spec"], parent, readable_file)
             elif mode == "review":
@@ -242,13 +248,18 @@ def prepare_tasks(options, out_dir):
                 if key in entry and (type(entry[key]) is not int or entry[key] < minimum):
                     raise ValueError(f"{key} must be an integer >= {minimum}")
             flags = {key: getattr(options, key) for key in BOOLEAN_FLAGS}
-            for key in ("structured", "ephemeral"):
+            for key in ("structured", "ephemeral", "web_search"):
                 value = entry.get(key, flags[key])
                 if type(value) is not bool:
                     raise ValueError(f"{key} must be a boolean")
                 flags[key] = value
-            if flags["structured"] and options.schema:
+            task_schema = (manifest_path(entry["schema"], parent, readable_file)
+                           if "schema" in entry else options.schema)
+            if flags["structured"] and task_schema is not None:
                 raise ValueError("--structured and --schema are mutually exclusive")
+            images = options.image + [
+                manifest_path(path, parent, readable_file) for path in value_list(entry, "images")
+            ]
             add_dirs = options.add_dir + [
                 manifest_path(path, parent, directory) for path in value_list(entry, "add_dirs")
             ]
@@ -276,6 +287,7 @@ def prepare_tasks(options, out_dir):
         tasks.append({
             "name": name, "mode": mode, "spec": spec, "dir": target, "out_dir": out_dir / name,
             "overrides": overrides, "flags": flags, "add_dirs": add_dirs, "configs": configs,
+            "images": images, "schema": task_schema,
             "isolation": isolation, "git_root": root, "lock": lock,
             "base_dirty_warning": dirty, "worktree": None, "setup_error": "",
         })
@@ -331,6 +343,8 @@ def worker_command(run_codex, task, schema):
     cmd.extend("--" + key.replace("_", "-") for key, enabled in task["flags"].items() if enabled)
     if schema:
         cmd.extend(["--schema", str(schema)])
+    for path in task["images"]:
+        cmd.extend(["--image", str(path)])
     for path in add_dirs:
         cmd.extend(["--add-dir", str(path)])
     for config in task["configs"]:
@@ -376,7 +390,7 @@ def run_one(task, run_codex, options):
         with stdout_log.open("wb") as stdout, stderr_log.open("wb") as stderr:
             if task["setup_error"]:
                 raise ValueError(task["setup_error"])
-            cmd = worker_command(run_codex, task, options.schema)
+            cmd = worker_command(run_codex, task, task["schema"])
             result = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
             returncode = result.returncode
         if fingerprint(summary_file) != previous_summary and summary_file.is_file():

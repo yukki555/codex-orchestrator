@@ -2,101 +2,117 @@
 name: codex-orchestrator
 description: >-
   Orchestrate local OpenAI Codex CLI (codex exec) via codex-worker subagents or
-  run_codex.sh / run_codex_parallel.sh for local coding, DAG parallel multi-module
-  implementation, debugging, test authoring, and independent code reviews. Always use
-  for new local code files, edits >10 lines, and Codex-assisted reviews or diagnostics.
+  run_codex.sh / run_codex_parallel.sh across local coding, DAG parallel multi-module
+  implementation, Git review, multi-model research, blind red-team debate, and experiment data
+  analysis. Always use for new local code files, edits >10 lines, Codex QA, and /research /debate /analyze.
 ---
 
-# Codex Orchestrator (v2.1)
+# Codex Orchestrator (v3.0)
 
-Operate a **Manager + High-Execution Implementer** workflow: Gemini acts as the **Principal Engineering Manager & Decision-Maker**, while local Codex CLI acts as the **High-Execution Staff Implementer & Independent Reviewer**.
+Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity: Gemini acts as **Principal Manager, Collector & Decision-Maker**, while local **Codex CLI** acts as **High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst**.
 
-## Role Split & Delegate Guard
+## Role Split, Entry Points & Delegate Guard
 
-* **Gemini (Principal Engineering Manager & Decision-Maker)**:
-  * Explores context, aligns architecture and tradeoffs with the user, locks shared interface contracts & GPT-6.2-tuned Specs under `/tmp/codex-orchestrator/<task-id>/`, orchestrates parallel or sequential `codex-worker` subagents / scripts, performs layered verification, and rewrites raw evidence into human-readable review briefs.
-  * **Guardrail**: The plugin's `PreToolUse` hook (`codex-delegate-guard`) blocks Gemini from creating new code files or making `> 10`-line logic-code edits directly unless the user explicitly asks to skip Codex.
-* **Codex CLI (High-Execution Local Implementer & Reviewer)**:
-  * Executes local coding (`implement`), structured diagnostics (`consult`), and Git QA (`review`), continuing on short threads via `resume` or fresh targeted runs when needed.
-  * **Local-Only Boundary**: Keep Codex local to code/static/unit checks without `network_access=true` SSH loops; let `codex-worker` or Gemini run remote SSH syncs and GPU/PyTorch tests.
+* **Gemini (Principal Manager, Collector & Decision-Maker)**:
+  * Explores local context (`read_file` / search), collects web/remote evidence into frozen corpora (`/tmp/codex-orchestrator/<task-id>/corpus/`), aligns tradeoffs with the user (`/plan`, `/grill-me`), locks shared contracts & GPT-6.2-tuned Specs, orchestrates `codex-worker` subagents or `run_codex.sh` / `run_codex_parallel.sh`, performs layered verification & citation spot-checks, and rewrites raw evidence into human-readable Chinese briefs.
+  * **Guardrail**: The plugin's root `hooks.json` (`PreToolUse` `codex-delegate-guard`) blocks Gemini from creating new code files or making `> 10`-line logic edits directly unless the user explicitly asks to skip Codex (`不用codex` / `skip codex` / `你直接改`). Read-only research/debate/analysis tasks are **not** hook-blocked; they use tiered soft routing (`/research`, `/debate`, `/analyze`, or auto-upgrade on >=3-option trade studies / high-stakes decisions).
+* **`codex-worker` Subagent vs Direct `run_command`**:
+  * Delegate to `codex-worker` when isolating multi-round repair loops (`<= 2` rounds), SHA-256 remote SSH syncs, and noisy GPU/PyTorch test logs out of the main conversation.
+  * Call `run_codex.sh` / `run_codex_parallel.sh` directly via `run_command` for fast single-turn `consult`, `review --structured`, `research`, `critique`, `analyze`, clean 1-shot `implement`, or `--manifest` parallel fan-outs.
+* **Bundled Slash Skills**:
+  * Engineering: `/impl` (single implementation), `/review` (structured diff QA), `/dag` (multi-module DAG parallel workflow).
+  * General / Research: `/research` (frozen-corpus parallel research + blind critique), `/debate` (blind red-team decision debate), `/analyze` (paper/code/experiment consistency analysis).
 
-## DAG Parallelism Gate (Multi-File Features)
+## DAG Parallelism Gate (Code & Research)
 
-When `implement` touches **>= 3 loosely coupled files** or **> 200 lines**, split into a conflict-free DAG rather than a single monolithic `600s` thread:
+* **Multi-File Code Features (`>= 3` loosely coupled files or `> 200` lines)**:
+  1. **Stage 0 (Contract)**: Write `/tmp/codex-orchestrator/<task-id>/contract.md` pinning cross-module signatures, schema/dict keys, CLI args, and remote isolation paths.
+  2. **Stage 1 (2–3 Parallel Workers)**: Fan out disjoint modules with `--timeout 240–300` via [run_codex_parallel.sh](./scripts/run_codex_parallel.sh) (`--task` or `--manifest <file.json>` with per-task `model`/`effort`/`speed`/`add_dirs`/`images`/`web_search`/`schema`). In Git repos with valid `HEAD`, `--mode implement` defaults to managed detached worktrees + `changes.patch` (including new untracked files via `git add -N`) + stacked `merge_check` (`--shared-dir` skips worktrees; `--keep-worktrees` retains them).
+  3. **Stage 2 (Integration Worker)**: Apply verified Stage 1 patches (`git apply`), then run one integration worker on glue files.
+  4. **Stage 3 (Parallel Verification ∥ Codex Review)**: Run remote GPU/E2E tests concurrently with local `run_codex.sh review --structured`.
+* **Multi-Angle Research / Experiment Analysis (`>= 2` slices or `>= 3` options/runs)**:
+  1. **Stage 0 (Frozen Corpus)**: Gemini gathers web/browser/local/SSH materials into `/tmp/codex-orchestrator/<task-id>/corpus/` + `sources_index.json`.
+  2. **Stage 1 (Heterogeneous Parallel Fan-out)**: Run `run_codex_parallel.sh --mode research|analyze --structured --manifest ...` against `corpus/` (works in non-Git directories via `shared-dir`, optional `--image` plots & opt-in `--web-search`) alongside optional Antigravity `research`/`browser` subagents.
+  3. **Stage 2 (Blind Critique)**: Run `run_codex.sh critique --structured` on a neutralized draft to expose P0/P1 flaws and missing alternatives.
+  4. **Stage 3 (Citation Spot-Check & Decision Brief)**: Spot-check 2–3 core `source_ids`/`evidence_location` entries directly, then write a Chinese decision brief.
 
-1. **Stage 0 (Contract)**: Write `/tmp/codex-orchestrator/<task-id>/contract.md` pinning shared function signatures, dict/schema keys, CLI args, and remote isolation paths.
-2. **Stage 1 (2–3 Parallel Workers)**: Fan out disjoint modules with `--timeout 240–300` via [run_codex_parallel.sh](./scripts/run_codex_parallel.sh) (supports `--task` or `--manifest <file.json>` with per-task `model`/`effort`/`speed`/`add_dirs`).
-   * In Git repos with valid `HEAD`, `--mode implement` defaults to **managed detached worktrees**, exports `changes.patch` (including new untracked files via `git add -N`), cleans up passing worktrees automatically (`--keep-worktrees` retains them), and runs cross-worker `merge_check` (working-tree `git apply --check` + sequential stacked apply verification in a throwaway worktree).
-   * Pass `--shared-dir` only when file ownership is 100% disjoint and zero merge step is desired.
-3. **Stage 2 (Integration Worker)**: Apply verified Stage 1 patches, then run one integration worker on glue files (`train.py` / scripts).
-4. **Stage 3 (Parallel GPU Test ∥ Codex Review)**: Run remote GPU/E2E validation concurrently with local `run_codex.sh review --structured`.
-
-## Modes, Model, Effort & Decoupled Speed Routing
+## Modes, Models, Schemas & Decoupled Speed Routing
 
 Speed tier (`--speed <default|fast|ultrafast|inherit>`) is **orthogonal** to model and reasoning effort:
 
-| Mode | Default Model / Effort | Default Speed (`service_tier`) | Default `--max-cmds` | Mechanism |
+| Mode | Default Model / Effort | Default Speed | Default `--max-cmds` | Sandbox & `--structured` Schema |
 | :--- | :--- | :--- | :--- | :--- |
-| `implement` | `gpt-6.2-sol` / `medium` | `fast` (because `medium`) | `12` (`0` disables) | `-s workspace-write` |
-| `consult` | `gpt-6.2-astra` / `medium` | `fast` (because `medium`) | `8` (`0` disables) | `-s read-only` |
-| `review` (with `--structured`/`--prompt`/`--spec`/`--max-cmds > 0`) | `gpt-6.2-astra` / `medium` | `fast` (because `medium`) | `8` (`0` disables) | `read-only-exec` with bounded git stat snapshot + JSON schema |
-| `review` (bare target, `--max-cmds 0` or omitted w/o prompt/schema) | `gpt-6.2-astra` / `medium` | `fast` (because `medium`) | `0` | Native `codex exec review` |
-| `resume` | Auto-inherited prior model / `medium` | `fast` (because `medium`) | `8` (`0` disables) | `codex exec resume` (inherits prior `add_dirs` for `workspace-write`) |
+| `implement` | `gpt-6.2-sol` / `medium` | `fast` | `12` (`0` disables) | `-s workspace-write` -> [codex-output-schema.json](./references/codex-output-schema.json) |
+| `consult` | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `-s read-only` -> [codex-output-schema.json](./references/codex-output-schema.json) |
+| `review` (`--structured`/`--prompt`/`--spec`/`--image`/`--max-cmds > 0`) | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `read-only-exec` + bounded git snapshot -> [codex-output-schema.json](./references/codex-output-schema.json) |
+| `review` (bare target, `--max-cmds 0` or omitted w/o prompt/schema/image) | `gpt-6.2-astra` / `medium` | `fast` | `0` | Native `codex exec review` |
+| `resume` | Auto-inherited prior model / `medium` | `fast` | `8` (`0` disables) | `codex exec resume` (inherits prior `add_dirs` for `workspace-write`) |
+| `research` | `gpt-6.2-astra` / `medium` | `fast` | `10` (`0` disables) | `-s read-only` -> [research-output-schema.json](./references/research-output-schema.json) |
+| `critique` | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `-s read-only` -> [critique-output-schema.json](./references/critique-output-schema.json) |
+| `analyze` | `gpt-6.2-astra` / `medium` | `fast` | `10` (`0` disables) | `-s read-only` -> [analysis-output-schema.json](./references/analysis-output-schema.json) |
 | `--fast` preset | Sets unset options to `gpt-6.2-sol` / `low` / `fast` | `fast` | Mode default | Never clobbers explicit `--model`/`--effort`/`--speed` |
 
+* **Multimodal & Live Search Flags**:
+  * `--image <FILE>` (repeatable): Attaches PNG/JPG charts, diagrams, or screenshots (`-i <FILE>`) to `consult`, `implement`, `research`, `critique`, `analyze`, `resume`, or `review` (auto-routes `review` via `read-only-exec`). Supported in `run_codex_parallel.sh` via `--image` or per-task manifest `"images": [...]`.
+  * `--web-search`: Opt-in flag (default **OFF** with explicit `-c web_search="disabled"` to keep runs reproducible on local/frozen corpora). When enabled, invokes `codex --search exec ...` so Codex can call the native Responses `web_search` tool. Supported in `run_codex_parallel.sh` via `--web-search` or per-task manifest `"web_search": true`.
 * **Speed Defaults**: Effective effort `low` or `medium` automatically uses `service_tier="fast"` (`2x` speed). `high`, `xhigh`, `max`, `ultra` default to `default` (add `--speed fast` explicitly when speed matters; `--speed default` forces standard tier on `low`/`medium`). `ultrafast` works on `gpt-6.2-sol` and auto-downgrades to `fast` with a warning on `gpt-6.2-astra`.
-* **Rules & Config Isolation**: Both `--ignore-user-config` and `--ignore-rules` default to **enabled** (avoiding macOS sandbox `Operation not permitted` failures on `~/.codex/config.toml` and `~/.codex/rules`); `--use-user-config` / `--use-rules` automatically fall back and retry if blocked.
-* **`--structured` & Telemetry**: Enforces [codex-output-schema.json](./references/codex-output-schema.json), records `structured_valid`, `modified_files`, and on failure/timeout extracts `partial_progress` (`modified_files`, last 3 `agent_message`s, failed commands, in-flight commands) directly into `summary.json` and stdout.
+* **Rules & Config Isolation**: Both `--ignore-user-config` and `--ignore-rules` default to **enabled** (preserving `~/.codex` login while skipping `~/.codex/config.toml` and `~/.codex/rules`); `--use-user-config` / `--use-rules` automatically fall back and retry if blocked.
+* **`--structured` & Telemetry**: Enforces and recursively validates the mode's bundled strict JSON Schema (or custom `--schema <FILE>`, including per-task `schema` in parallel manifests), records `structured_valid`, `web_search`, `images`, `schema_file`, and `modified_files` in `summary.json` (printing `structured`, `web_search`, `structured_valid`, and `partial_progress` to stdout).
 
 ## Context Hygiene & Anti-Bloat Rules
 
 * **Anti-Bloat `resume` Threshold**: Reserve `resume` for immediate short loops (`< 1,000,000` prior `tokens.input`, non-timeout). When applying post-review `file:line` fixes or recovering from a huge/timed-out run, spawn a **fresh `implement --effort medium --speed fast`** run instead of resuming multi-million-token history.
-* **Environment Facts in Spec**: List local runtime limitations (e.g., "macOS host has no PyTorch/zarr; do NOT probe disk or read `~/.codex/skills/*`") in `## Environment & Tooling Facts` so Codex skips wasted discovery commands.
+* **Environment & Corpus Facts in Spec**: State local runtime limitations and corpus index paths explicitly so Codex skips wasted discovery commands.
 
 ## Layered Verification & Human-Readable Brief ("说人话" Gate)
 
 Before replying to the user after any Codex run:
 
 1. **Diff & Scope Check (`implement`)**: Inspect `git status` / `git diff` (or `parallel-summary.json` `merge_ok` + patches) to confirm zero scope drift.
-2. **Layered Verification (No Redundant Reruns)**:
-   * If `codex-worker` already ran unit tests and remote SHA-256 sync with verified command outputs, Manager **does not** re-run the same CPU unit tests — instead spot-check 1–2 code edits (`read_file`) and run higher-tier gates (multi-GPU smoke / E2E).
-   * For `consult` / `review`, spot-check at least 1–2 cited `file:line` claims directly and label verified facts vs hypotheses.
+2. **Layered Verification / Citation Spot-Checks**:
+   * Code: If `codex-worker` (or Codex self-check) already verified unit tests and remote SHA-256 sync with real command outputs, Manager does not re-run identical CPU unit tests — instead spot-check 1–2 code edits (`read_file`) and run higher-tier gates (multi-GPU smoke / E2E).
+   * Consult / Review / Research / Critique / Analyze: Confirm `structured_valid: true` and spot-check at least `2` cited `file:line`, `source_ids`, or raw metric locations directly, labeling verified facts vs inferences and `knowledge_gaps`.
 3. **Human-Readable Brief Rewrite**:
    * **Hard Ban**: Never paste, echo, or mechanically translate Codex's raw `last_message.md` text/JSON to the user.
-   * Rewrite from scratch in clear, natural Chinese following [user-brief-template.md](./references/user-brief-template.md).
+   * Rewrite from scratch in clear, natural Chinese following [user-brief-template.md](./references/user-brief-template.md) (**Template A** for code/review; **Template B** for research/debate/analysis).
 
 ## Invocation Examples
 
 ```bash
+SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
+
 # 1. Default medium+fast structured implementation
-~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh implement \
-  --dir "/path/to/repo" --structured --timeout 240 \
+"$SCRIPTS/run_codex.sh" implement \
+  --dir "/path/to/repo" --add-dir "/path/to/tests" \
+  --structured --timeout 240 \
   --spec /tmp/codex-orchestrator/task-1/spec.md \
   --out-dir /tmp/codex-orchestrator/task-1/implement
 
-# 2. High-stakes consult (effort=high, optional --speed fast)
-~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh consult \
-  --dir "/path/to/repo" --effort high --speed fast --ephemeral --structured \
-  --spec /tmp/codex-orchestrator/task-2/spec.md \
-  --out-dir /tmp/codex-orchestrator/task-2/consult
+# 2. Structured deep research on a frozen non-Git corpus (+ optional chart image)
+"$SCRIPTS/run_codex.sh" research \
+  --dir /tmp/codex-orchestrator/topic-1/corpus --structured --ephemeral \
+  --image /tmp/codex-orchestrator/topic-1/corpus/benchmark.png \
+  --spec /tmp/codex-orchestrator/topic-1/spec-research.md \
+  --out-dir /tmp/codex-orchestrator/topic-1/research
 
-# 3. Single-pass structured Git diff review (routes cleanly via read-only exec)
-~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh review \
-  --dir "/path/to/repo" --uncommitted --structured --max-cmds 8 \
-  --prompt "Check regressions, edge cases, and backward compatibility." \
-  --out-dir /tmp/codex-orchestrator/task-3/review
+# 3. Blind red-team critique with high reasoning effort + fast tier
+"$SCRIPTS/run_codex.sh" critique \
+  --dir /tmp/codex-orchestrator/debate-1 --structured --effort high --speed fast --ephemeral \
+  --spec /tmp/codex-orchestrator/debate-1/spec-critique.md \
+  --out-dir /tmp/codex-orchestrator/debate-1/critique
 
-# 4. Short-loop resume (auto-inherits prior model and --add-dir paths)
-~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh resume \
-  --dir "/path/to/repo" --id "<thread_id>" --sandbox workspace-write --structured \
-  --prompt "Tests failed on case X with error Y. Fix within allowed scope and re-verify." \
-  --out-dir /tmp/codex-orchestrator/task-1/resume-1
+# 4. Experiment & code consistency analysis with plots
+"$SCRIPTS/run_codex.sh" analyze \
+  --dir "/path/to/repo" --structured --image /tmp/codex-orchestrator/exp-1/loss.png \
+  --spec /tmp/codex-orchestrator/exp-1/spec-analyze.md \
+  --out-dir /tmp/codex-orchestrator/exp-1/analyze
 
-# 5. Parallel managed-worktree implementation + patch conflict preflight
-~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh \
-  --out-dir /tmp/codex-orchestrator/task-4/parallel-impl \
-  --mode implement --structured --max-parallel 3 --dir "/path/to/repo" \
-  --timeout 240 --manifest /tmp/codex-orchestrator/task-4/manifest.json
+# 5. Parallel heterogeneous research + critique manifest (or parallel worktree implement)
+"$SCRIPTS/run_codex_parallel.sh" \
+  --out-dir /tmp/codex-orchestrator/topic-1/parallel \
+  --mode research --structured --max-parallel 3 \
+  --dir /tmp/codex-orchestrator/topic-1/corpus --timeout 240 \
+  --manifest /tmp/codex-orchestrator/topic-1/manifest.json
 ```
 
 Never print, inspect, or log `~/.codex/auth.json` or API keys.

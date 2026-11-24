@@ -1,11 +1,15 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "Manager/Implementer Dual-Brain orchestration (v2.1): Gemini aligns architecture, enforces DAG parallelism, writes Specs, orchestrates codex-worker subagents, runs layered verification, and rewrites Codex outputs into clear human-readable review briefs; Codex CLI executes local coding, debugging, and structured reviews with decoupled fast-tier speed routing.",
-  "version": "2.1.0",
+  "description": "General-purpose Dual-Brain orchestration plugin for Google Antigravity (v3.0): Gemini plans, freezes research/data corpora, orchestrates codex-worker or Codex CLI across coding (/impl, /review, /dag) and research/red-team/analysis (/research, /debate, /analyze) with strict JSON schemas, layered verification, and clear Chinese briefs.",
+  "version": "3.0.0",
+  "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
-    "Explore the codebase, write a Spec, delegate implementation to codex-worker, and brief me clearly on the verified diff",
-    "Orchestrate a Codex CLI independent review on my uncommitted changes and summarize key risks in plain Chinese",
-    "Have Codex analyze this bug's root cause with structured evidence, spot-check it, and explain the options to me"
+    "/impl Explore the codebase, write a Spec, delegate implementation to codex-worker / Codex CLI, verify, and brief me clearly",
+    "/review Run a single-pass structured Codex CLI review on uncommitted changes and summarize key risks in plain Chinese",
+    "/dag Lock a shared contract, run parallel managed-worktree Codex workers, check merge conflicts, and brief me",
+    "/research Freeze a source corpus, run parallel Codex research + blind critique, spot-check citations, and brief me",
+    "/debate Run a blind red-team Codex critique on this proposal, adjudicate P0/P1 challenges, and give a decision matrix",
+    "/analyze Cross-check paper/theory, code, and experiment metrics with Codex analyze mode and highlight discrepancies"
   ]
 }

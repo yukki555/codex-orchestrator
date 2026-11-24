@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodexOrchestratorResearchEvidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "claims",
+    "comparison_matrix",
+    "counter_evidence",
+    "knowledge_gaps",
+    "recommended_next_checks"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "analysis_ready",
+        "needs_more_evidence",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "statement",
+          "confidence",
+          "source_ids",
+          "quote_or_location"
+        ],
+        "properties": {
+          "statement": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "inferred",
+              "uncertain"
+            ]
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "quote_or_location": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "comparison_matrix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dimension",
+          "entries"
+        ],
+        "properties": {
+          "dimension": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "option",
+                "assessment",
+                "source_ids"
+              ],
+              "properties": {
+                "option": {
+                  "type": "string"
+                },
+                "assessment": {
+                  "type": "string"
+                },
+                "source_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "counter_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "point",
+          "condition_or_scope",
+          "source_ids"
+        ],
+        "properties": {
+          "point": {
+            "type": "string"
+          },
+          "condition_or_scope": {
+            "type": "string"
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "knowledge_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recommended_next_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
