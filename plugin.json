@@ -1,13 +1,13 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.2): Gemini manages scope and frozen corpora while local Codex CLI executes scoped code (/impl, /dag), Git reviews (/review), and structured research/debate/analysis (/research, /debate, /analyze) with verified patch custody and fail-closed evidence.",
-  "version": "3.2.0",
+  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.5): pure-Python codex_orch kernel with declarative profiles, verified patch custody, host-side Proof-of-Work, opt-in cross-model TDD, and loose composition with /swarm and /run-workflow.",
+  "version": "3.5.0",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
-    "/impl Write a Spec, delegate scoped implementation to Codex CLI, verify independently, and brief me",
-    "/dag Lock a shared contract, run parallel managed-worktree Codex workers with patch custody checks, and brief me",
-    "/research Freeze a source corpus, run parallel Codex research and blind critique, spot-check citations, and brief me"
+    "/impl Write a Spec, delegate scoped implementation to Codex CLI (optional --tdd / Proof-of-Work), verify independently, and brief me",
+    "/dag Lock a shared contract, run parallel managed-worktree Codex workers with ownership table & patch custody, and brief me",
+    "/research Freeze a source corpus, run parallel Codex research + blind critique (or /run-workflow template), spot-check citations, and brief me"
   ]
 }

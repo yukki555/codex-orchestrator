@@ -1,50 +1,51 @@
-# Codex Orchestrator Behavioral Specification (`v3.2`)
+# Codex Orchestrator Behavioral Specification (`v3.5`)
 
 This document defines the stable **Session / Hands** behavioral invariants and conformance contract for `codex-orchestrator`. Orchestration policies and prompts live in the disposable **Brain** layer (`rules/`, `skills/`).
 
-## 1. Architecture Boundaries
+## 1. Architecture Boundaries (Brain / Session / Hands)
 
-* **Brain (`rules/`, `skills/`)**: Task routing, Fold-First cost gating, Spec templates, and the Communication Charter (`v3.1`).
-* **Session (Artifacts & `SPEC.md`)**: Immutable per-invocation evidence under `--out-dir` (`summary.json`, `last_message.md`, `events.jsonl`, `stderr.log`, `changes.patch`, `parallel-summary.json`).
-* **Hands (`scripts/run_codex.sh`, `scripts/run_codex_parallel.sh`, `scripts/codex_orch/`)**: Unopinionated local execution kernel responsible for credential stripping, streaming supervision, schema preflight/validation, and Git patch custody.
+* **Brain (`rules/`, `skills/`, `workflows/`)**: Lean (`<= 30` lines) always-on Fold-First ladder, 1-hop priority, Spec templates, `/swarm` & `/run-workflow` composition guides, and Communication Charter (`v3.1`).
+* **Session (Immutable Artifacts & `SPEC.md`)**: Numbered append-only attempt history under `<out-dir>/attempts/attempt-NNN/` with atomic top-level latest publication (`summary.json` written last), plus `changes.patch`, `verification.json`, and `parallel-summary.json`. `resume` discovery ignores `attempts/*/` duplicates.
+* **Hands (`scripts/codex_orch/`, `config/profiles.json`, thin `.sh` shims)**: Zero-dependency Python 3 stdlib execution kernel invoked via `exec python3 -I -B` (immune to CWD shadowing and Bash offset self-edit crashes), separating shared core logic from thin host adapters (`host_adapter.py`).
 
-## 2. Fail-Closed Execution & Exit Code Contract
+## 2. Fail-Closed Exit Code & Status Contract
 
-Wrapper exit status is strictly separated from the raw child process exit code (`codex_exit_code`):
+Wrapper status is strictly separated from child `codex_exit_code`:
 
 | Wrapper `status` | Wrapper `exit_code` | Condition |
 | :--- | ---: | :--- |
-| `ok` | `0` | Child exited `0`, no timeout/quota error, and (when `--structured` or `--schema` was requested) `structured_valid == true`. |
-| Usage / Preflight error | `2` | Invalid CLI args, unreadable/unsupported `--schema` keyword, unreadable explicit user config/rules, self-hosting in-place `implement` without `--worktree`, or `--dirty-policy fail` on a dirty checkout. **Must exit before creating `--out-dir`.** |
-| `schema_error` | `3` | Child exited `0` but `last_message.md` failed JSON parsing or JSON Schema validation when validation was requested. |
-| `paused_quota` | child code or `75` | Child failed with unambiguous quota/rate-limit signals; never blindly retry write tasks. |
-| `timeout` | `124` | Hard monotonic wall timeout (`--timeout`) expired; full process group terminated (`SIGTERM` -> `SIGKILL`). |
-| `stall_timeout` | `125` | Opt-in monotonic event inactivity timeout (`--stall-timeout`) expired; full process group terminated. |
-| `cancelled` | `128 + signal` | Wrapper/supervisor received `SIGTERM` or `SIGINT`; full process group terminated even if child exited `0`. |
-| `error` | child exit code / `1` | Child exited non-zero, custody verification failed, or required fresh `summary.json` / `invocation_id` match failed. |
+| `ok` | `0` | Child exited `0`, no cancellation/timeout/quota failure, requested schema valid, path policies clean, custody verified, and host verification (if requested) passed. |
+| Usage / Preflight error | `2` | Invalid CLI args, unreadable/unsupported `--schema` keyword, invalid trusted `.codex-orchestrator.json` (e.g. forbidden `before_run` hook), unreadable explicit config/rules, bidirectional self-hosting guard hit, or `--dirty-policy fail` on dirty checkout. **Must exit before creating `--out-dir`.** |
+| `schema_error` | `3` | Child exited `0` but `last_message.md` failed JSON or JSON Schema validation when `--structured`/`--schema` was requested. |
+| `tdd_red_failed` | `4` | Opt-in `--tdd` Stage RED did not produce a genuine collected assertion failure (rejects `Ran 0 tests`, `collected 0 items`, `ImportError`, `ModuleNotFoundError`, `SyntaxError`, `ERROR collecting`, or exit `0`). |
+| `protected_path_violation` / `scope_violation` | `5` | Worker added, modified, deleted, or renamed a file matching `protected_paths` (including frozen TDD tests) or outside non-empty `allowed_paths`. Worktree is preserved. |
+| `verification_failed` | `6` | Host-side Proof-of-Work (`--verify-cmd`/`--verify-preset`) or TDD Stage GREEN failed (non-zero exit, tree mismatch, 0 collected tests, or unexpected skips without `--tdd-allow-skips`). |
+| `paused_quota` | child code or `75` | Child exited **non-zero** with unambiguous quota/rate-limit signals in `stderr` or JSONL `error`/`turn.failed` events (never triggered when `codex_exit_code == 0` or by normal command/prose output). |
+| `timeout` | `124` | Hard monotonic wall timeout (`--timeout`) expired; entire process group terminated (`SIGTERM` -> `SIGKILL`). |
+| `stall_timeout` | `125` | Opt-in monotonic event inactivity timeout (`--stall-timeout`) expired; entire process group terminated. |
+| `cancelled` | `128 + signal` | Wrapper/supervisor received `SIGTERM`/`SIGINT`; entire process group terminated and failed closed even if child exited `0`. |
+| `error` | child exit code / `1` | Child exited non-zero, custody check failed, or fresh matching `summary.json` / `invocation_id` missing. |
 
-## 3. Private-Index Patch Custody Invariant (`run_codex_parallel.sh`)
+## 3. Declarative Profiles (`config/profiles.json`)
 
-1. Resolve `base_oid` (`git rev-parse --verify HEAD`) per selected checkout root (`git_root`), never conflating linked worktrees on different commits.
-2. Create detached worktrees explicitly at `base_oid`. Track Git worktree registration explicitly; never fall back to `shutil.rmtree` when `git worktree remove` fails.
-3. Export deliverables using a private temporary `GIT_INDEX_FILE` initialized from the worker's final `HEAD`, staging all tracked edits/deletions and non-ignored untracked files under ordinary `.gitignore` rules (`final_tree_oid`).
-4. Derive BOTH `changes.patch` and `changed_files` from the exact `(base_oid, final_tree_oid)` pair (capturing commits inside the worktree even when `git status` is clean).
-5. Independently apply `changes.patch` to a fresh private index initialized at `base_oid` (`reconstructed_tree_oid`). Delete the worktree **only** when `reconstructed_tree_oid == final_tree_oid`, worker exited `0`, no errors occurred, and `--keep-worktrees` is unset. Preserve the worktree on any failure.
-6. Run merge checks in an atomic private temporary directory, reporting `base_reconstruct_ok` (clean `base_oid` sequential apply) separately from `target_apply_ok` (current mutable target checkout).
+Model defaults, effort defaults, speed tier capabilities (`supports_ultrafast`, `downgrade_ultrafast_to`), `max_cmds` defaults, and bundled schema mappings live declaratively in `skills/codex-orchestrator/config/profiles.json` (overridable via `--profiles-file` or `CODEX_ORCH_PROFILES_FILE`).
 
-## 4. Security, Telemetry & Stdout Hygiene
+## 4. Private-Index Patch Custody & Ownership Table (`parallel_runner.py`)
 
-* **Credential Isolation**: Child processes run under `codex_orch.env.build_child_env` (stripping host SSH/cloud/platform tokens while preserving Codex/OpenAI auth and runtime essentials). Artifact directories use `0700` permissions; failed command snippets and event errors are secret-redacted.
-* **Self-Hosting Guard**: Refuses in-place `implement` targeting the plugin's own script directory unless `--worktree` is set or executed from an immutable frozen copy.
-* **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` prints full `last_message.md` up to `4096` bytes and switches to a UTF-8-safe byte-bounded preview with file pointers above `4096` bytes.
-* **Parent-Owned Evidence Identity**: `run_codex_parallel.sh` generates a per-task `invocation_id` passed via `--invocation-id` and validates freshness, ID match, status, and conditional `structured_valid` (raw tasks with `structured_valid: null` remain valid).
-* **Budget Telemetry**: `summary.json` records `budget_exceeded`, `budget_utilization`, `cmd_per_modified_file` (`null` when zero modified files), `last_message_bytes`, `stdout_truncated`, and `malformed_event_lines`.
+1. Resolve `base_oid` (`git rev-parse --verify HEAD`) per selected checkout root (`git_root`).
+2. Reject unmerged index entries (`git ls-files -u`). Snapshot final Git-visible tree via racy-git-safe private `GIT_INDEX_FILE` (`copy real index -> add -A -> write-tree -> unlink -> read-tree staged_tree -> add -A -> write-tree`) capturing commits, force-staged ignored files, unstaged edits, deletions, and new non-ignored files while ignoring ordinary `.gitignore` caches.
+3. Derive `changes.patch` and `changed_files` from the exact `(base_oid, final_tree_oid)` pair and verify independent reconstruction (`reconstructed_tree_oid == final_tree_oid`) before removing any worktree. Never fall back to `shutil.rmtree` on Git cleanup failure.
+4. Run merge checks in atomic private temp dirs, reporting `base_reconstruct_ok` separately from `target_apply_ok`.
+5. For multi-task `/dag` runs, auto-inject a public **Parallel Ownership Table** into per-task `effective_spec.md` (without mutating caller specs) and enforce `allowed_paths`/`protected_paths` fail-closed.
 
-## 5. Conformance Matrix (`tests/test_plugin.py`)
+## 5. Trusted Repo Contract, Proof-of-Work & Opt-In Independent TDD (`verify.py`)
 
-Every release must pass zero-dependency `unittest` verification covering:
-1. Manifest/hooks/skills/schemas/personal-path hygiene + `agy plugin validate --strict`.
-2. Guard `strict` default (`<= 10` lines), stateless `CODEX_GUARD_PROFILE=pragmatic` (`<= 30` lines existing file, new file & `/impl`/`/dag` denied), and tightened path exemptions.
-3. Schema keyword preflight rejection (`oneOf`/`minItems`/`$ref`) before `--out-dir` creation and fail-closed exit `3` on invalid output.
-4. Child env stripping & secret redaction, wall/stall process-group termination, quota classification, self-hosting guard, and compact stdout byte bounds.
-5. Real Git repo patch custody (worker commit + unstaged edit + delete + new file + ignored cache), clean-after-commit non-empty `changed_files`, mixed raw/structured manifests, dirty-policy enforcement, and concurrent merge-check isolation.
+* **Trusted Policy Provenance**: Optional `.codex-orchestrator.json` is loaded strictly from `git show <base_oid>:.codex-orchestrator.json` or explicit `--contract <FILE>` — NEVER from the Codex-modified candidate tree. Only declarative keys (`version`, `allowed_paths`, `protected_paths`, `dirty_policy`, `max_timeout_s`, `verify_commands` as argv lists) are permitted; arbitrary shell hooks (`before_run`, `after_run`) are rejected at preflight.
+* **Host-Side Proof-of-Work (`verification.json`)**: Runs `verify_argv` with `shell=False` and `build_child_env()` (credentials stripped, `GIT_CEILING_DIRECTORIES` scoped, process-group cleanup guaranteed even on exit `0`) inside a clean detached verify worktree reconstructed from `base_oid` + verified patches, recording `(base_oid, test_snapshot_tree, candidate_tree_oid, reconstructed_tree_oid, argv, cwd_rel, policy_source, exit_code, redacted tails)`. *Trust boundary*: verification executes under the local OS user account rather than a kernel/VM sandbox; run inside an OS/container sandbox when evaluating untrusted third-party repositories.
+* **Opt-In Cross-Model TDD (`--tdd`)**: Two-snapshot protocol (`base_oid -> test_snapshot_commit`, requiring a non-empty frozen test set via `--tdd-test-dir` or `--tdd-test-path`): verify true RED before launching Codex -> run Codex relative to `test_snapshot_commit` with exact-path + glob `protected_paths` enforcement -> verify true GREEN requiring positive collected test execution count (`collected > 0`) and zero unexpected skips (unless `--tdd-allow-skips`).
+
+## 6. Security, Stdout Hygiene & Native Composition
+
+* **Credential Isolation**: `codex_orch.env.build_child_env` strips host SSH/cloud/platform tokens while preserving Codex auth and runtime essentials; `ensure_private_dir` rejects symlinks and verifies POSIX owner + `0700` mode; secrets are redacted from diagnostics.
+* **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` compacts `last_message.md > 4096` bytes into a UTF-8-safe preview with file pointers.
+* **Loose Antigravity Composition**: Use native `/swarm` (`land-before-kill`) + `/review` for interactive collaborative coding with external Codex final audit; use reusable read-only `/run-workflow` templates (`workflows/research_parallel.py`, `workflows/debate_multi_critic.py`) for card-based multi-slice research/critique.

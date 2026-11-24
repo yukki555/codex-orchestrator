@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -21,15 +22,29 @@ _QUOTA_MARKERS = (
     "usage_limit_reached", "rate_limit_exceeded", "insufficient_quota",
     "quota exceeded", "too many requests", "status 429", "http 429",
 )
-_QUOTA_OVERLAP = max(map(len, _QUOTA_MARKERS)) - 1
+
+
+def _has_quota_marker(text: str) -> bool:
+    text = text.lower()
+    return any(marker in text for marker in _QUOTA_MARKERS)
+
+
+def _classify_quota_lines(events: Iterable[str], stderr: Iterable[str]) -> bool:
+    if any(_has_quota_marker(line) for line in stderr):
+        return True
+    for line in events:
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict) and event.get("type") in ("error", "turn.failed"):
+                if _has_quota_marker(json.dumps(event)):
+                    return True
+        except (ValueError, RecursionError):
+            continue
+    return False
 
 
 def classify_quota_error(events_text: str, stderr_text: str) -> bool:
-    return any(
-        marker in stream.lower()
-        for stream in (events_text, stderr_text)
-        for marker in _QUOTA_MARKERS
-    )
+    return _classify_quota_lines(events_text.split("\n"), (stderr_text,))
 
 
 def _terminate_group(pgid, grace_s, initial_signal, reap=None):
@@ -69,12 +84,11 @@ def terminate_process_group(pgid, grace_s=2.0):
     _terminate_group(pgid, grace_s, signal.SIGTERM)
 
 
-def _drain_pipe(pipe, output, on_chunk, stop_reading, quota_found, errors):
+def _drain_pipe(pipe, output, on_chunk, stop_reading, errors):
     try:
         fd = pipe.fileno()
         poller = select.poll()
         poller.register(fd, select.POLLIN)
-        quota_tail = ""
         while True:
             if not poller.poll(100):
                 if stop_reading.is_set():
@@ -87,12 +101,6 @@ def _drain_pipe(pipe, output, on_chunk, stop_reading, quota_found, errors):
                 on_chunk()
             output.write(chunk)
             output.flush()
-            if not quota_found.is_set():
-                # Quota markers are ASCII. Retain an overlap for markers split across reads.
-                quota_text = quota_tail + chunk.decode("latin-1").lower()
-                if any(marker in quota_text for marker in _QUOTA_MARKERS):
-                    quota_found.set()
-                quota_tail = quota_text[-_QUOTA_OVERLAP:]
     except Exception as exc:
         errors.put(exc)
 
@@ -106,7 +114,6 @@ def run_supervised(
     timed_out = stall_timed_out = False
     activity_lock = threading.Lock()
     stop_reading = threading.Event()
-    quota_found = threading.Event()
     errors = queue.SimpleQueue()
 
     def receive_signal(signum, _frame):
@@ -139,7 +146,7 @@ def run_supervised(
             ):
                 reader = threading.Thread(
                     target=_drain_pipe,
-                    args=(pipe, output, on_chunk, stop_reading, quota_found, errors),
+                    args=(pipe, output, on_chunk, stop_reading, errors),
                     daemon=True,
                 )
                 reader.start()
@@ -174,6 +181,12 @@ def run_supervised(
         if not errors.empty():
             raise errors.get()
 
+    paused_quota = False
+    if codex_exit_code != 0:
+        with (open(events_path, encoding="utf-8", errors="replace") as events,
+              open(stderr_path, encoding="utf-8", errors="replace") as stderr):
+            paused_quota = _classify_quota_lines(events, stderr)
+
     return {
         "codex_exit_code": codex_exit_code,
         "duration_s": round(time.monotonic() - start_mono, 3),
@@ -181,7 +194,7 @@ def run_supervised(
         "stall_timed_out": stall_timed_out,
         "cancelled": received_signal is not None,
         "signal": int(received_signal) if received_signal is not None else None,
-        "paused_quota": quota_found.is_set(),
+        "paused_quota": paused_quota,
         "timeout_s": timeout_s,
         "stall_timeout_s": stall_timeout_s,
     }

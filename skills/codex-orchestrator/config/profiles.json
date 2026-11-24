@@ -1,0 +1,53 @@
+{
+  "version": "3.5.0",
+  "valid_modes": ["consult", "implement", "review", "resume", "research", "critique", "analyze"],
+  "valid_efforts": ["low", "medium", "high", "xhigh", "max", "ultra", "inherit"],
+  "valid_speeds": ["default", "fast", "ultrafast", "inherit"],
+  "fast_preset": {"model": "gpt-6.2-sol", "effort": "low"},
+  "defaults": {
+    "effort": "medium",
+    "model_by_mode": {
+      "implement": "gpt-6.2-sol",
+      "consult": "gpt-6.2-astra",
+      "review": "gpt-6.2-astra",
+      "resume": "gpt-6.2-astra",
+      "research": "gpt-6.2-astra",
+      "critique": "gpt-6.2-astra",
+      "analyze": "gpt-6.2-astra"
+    },
+    "max_cmds_by_mode": {
+      "implement": 12,
+      "research": 10,
+      "analyze": 10,
+      "consult": 8,
+      "critique": 8,
+      "resume": 8,
+      "review_exec": 8,
+      "review_native": 0
+    },
+    "schema_by_mode": {
+      "research": "research-output-schema.json",
+      "critique": "critique-output-schema.json",
+      "analyze": "analysis-output-schema.json",
+      "default": "codex-output-schema.json"
+    }
+  },
+  "models": {
+    "gpt-6.2-sol": {
+      "supports_ultrafast": true,
+      "low_medium_speed": "ultrafast",
+      "high_speed": "default"
+    },
+    "gpt-6.2-astra": {
+      "supports_ultrafast": false,
+      "downgrade_ultrafast_to": "fast",
+      "low_medium_speed": "fast",
+      "high_speed": "default"
+    }
+  },
+  "fallback_model_capabilities": {
+    "supports_ultrafast": true,
+    "low_medium_speed": "fast",
+    "high_speed": "default"
+  }
+}
