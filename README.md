@@ -1,8 +1,8 @@
-# Codex Orchestrator (`v3.0.0`)
+# Codex Orchestrator (`v3.1.0`)
 
 A **General-Purpose Dual-Brain** plugin for **Google Antigravity** that pairs **Gemini** (Principal Manager, Corpus Collector & Decision-Maker) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across both **software engineering** (`/impl`, `/review`, `/dag`) and **deep research / red-team debate / experiment analysis** (`/research`, `/debate`, `/analyze`).
 
-> Looking for the terminal-focused Antigravity CLI (`agy`) edition? See the [`gemini-cli`](https://github.com/yukki555/codex-orchestrator/tree/gemini-cli) branch. This **`main` (Antigravity Desktop)** branch keeps full backward compatibility with all `v2.1` coding workflows and upgrades to **`v3.0.0`** with pluggable non-code profiles (`research`, `critique`, `analyze`), 3 new strict JSON schemas, recursive schema validation, `--image` multimodal attachment, opt-in `--web-search`, and 6 bundled slash skills.
+> Looking for the terminal-focused Antigravity CLI (`agy`) edition? See the [`gemini-cli`](https://github.com/yukki555/codex-orchestrator/tree/gemini-cli) branch. This **`main` (Antigravity Desktop)** branch keeps full backward compatibility with all `v2.1`/`v3.0` workflows and upgrades to **`v3.1.0`** with the **Dynamic Communication Charter (`v3.1`)** (replacing rigid fixed 5-section templates with task-weight dynamic routing and strict factual-precision guardrails), alongside pluggable non-code profiles (`research`, `critique`, `analyze`), 4 strict JSON schemas, recursive schema validation, `--image` multimodal attachment, opt-in `--web-search`, and 6 bundled slash skills.
 
 ## Architecture Overview
 
@@ -15,11 +15,13 @@ flowchart LR
     G2 --> U
 ```
 
-* **Gemini (Principal Manager & Collector)**: Explores codebases, collects web/browser/remote evidence into frozen corpora (`/tmp/codex-orchestrator/<task-id>/corpus/`), aligns tradeoffs with the user, locks shared cross-module contracts and concise Specs, orchestrates `codex-worker` or parallel runners, runs layered verification & citation spot-checks, and rewrites terse Codex logs into clear human-readable Chinese briefs (**Template A** for code, **Template B** for research/debate/analysis).
+* **Gemini (Principal Manager & Collector)**: Explores codebases, collects web/browser/remote evidence into frozen corpora (`/tmp/codex-orchestrator/<task-id>/corpus/`), aligns tradeoffs with the user, locks shared cross-module contracts and concise Specs, orchestrates `codex-worker` or parallel runners, runs layered verification & citation spot-checks, and synthesizes raw Codex outputs into calm, precise Chinese replies using the **Communication Charter (`v3.1`)** dynamic routing (`consult`, lightweight code changes, heavyweight delivery / `review`, and `research` / `critique` / `analyze`).
 * **Local Codex CLI (Implementer, Reviewer & Red-Team Analyst)**: Executes all new local code files, `> 10`-line logic edits, refactors, test authoring, deep diagnostics, Git diff QA, and read-only structured research / blind critique / experiment audits via non-interactive `codex exec`.
 * **Hook Guardrail (`codex-delegate-guard`)**: `PreToolUse` hook prevents Gemini from bypassing Codex on non-trivial local source edits while allowing docs/configs, `/tmp/`, `~/.gemini/`, `<= 10`-line micro-edits, and explicit user opt-outs (`不用codex` / `skip codex` / `你直接改`). Read-only research/debate/analysis tasks stay hook-free and use tiered soft routing.
 
-## Key Features (`v3.0.0`)
+## Key Features (`v3.1.0`)
+
+* **Dynamic Communication Charter (`v3.1`)**: Replaces fixed one-size-fits-all 5-section templates with 5 expression & factual-fidelity iron rules (restrained architectural tone, zero qualifier/math distortion, upfront verification/evidence watermarks, zero slot-filling hallucination, lightweight `file:line`/`source_id` anchors) plus 4 task-weight dynamic routes (`consult`, lightweight 1–2 file fixes, heavyweight delivery / `review`, and `research` / `critique` / `analyze`).
 
 * **General-Purpose Pluggable Profiles & 4 Strict JSON Schemas**:
   * **Coding (`codex-output-schema.json`)**: `implement`, `consult`, `review`, `resume` with managed detached Git worktrees, `changes.patch` export (including untracked files via `git add -N`), and sequential stacked `merge_check` (`merge_ok`).
@@ -110,12 +112,12 @@ python3 -m unittest discover -s ~/.gemini/config/plugins/codex-orchestrator/test
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json` | Antigravity plugin manifest (`v3.0.0`) |
+| `plugin.json` | Antigravity plugin manifest (`v3.1.0`) |
 | `hooks.json` | Root `PreToolUse` hook registration (`codex-delegate-guard`, code writes only) |
-| `rules/AGENTS.md` | Always-on Dual-Brain delegation, tiered research routing, DAG gate, and Chinese synthesis policy |
+| `rules/AGENTS.md` | Always-on Dual-Brain delegation, tiered research routing, DAG gate, and Communication Charter (`v3.1`) |
 | `agents/codex-worker.md` | Dedicated Codex execution & verification subagent definition |
-| `skills/codex-orchestrator/SKILL.md` | Full orchestration workflow handbook (`v3.0`) |
+| `skills/codex-orchestrator/SKILL.md` | Full orchestration workflow handbook (`v3.1`) |
 | `skills/{impl,review,dag,research,debate,analyze}/SKILL.md` | Bundled slash skills covering code & general research/debate/analysis workflows |
 | `skills/codex-orchestrator/scripts/` | `run_codex.sh`, `run_codex_parallel.sh`, and `hook_delegate_guard.py` |
-| `skills/codex-orchestrator/references/` | 4 strict JSON schemas (`codex`, `research`, `critique`, `analysis`), Spec templates, and Template A/B brief templates |
+| `skills/codex-orchestrator/references/` | 4 strict JSON schemas (`codex`, `research`, `critique`, `analysis`), Spec templates, and the `v3.1` Communication Charter (`user-brief-template.md`) |
 | `tests/test_plugin.py` | Unit tests covering manifests, `hooks.json`, `agents`, 7 skills, 4 schemas, stub-Codex CLI/parallel routing, and hook guard |

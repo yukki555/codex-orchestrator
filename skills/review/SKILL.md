@@ -19,4 +19,4 @@ Execute strictly in order:
    * Confirm `structured_valid: true` in `summary.json` and read `last_message.md`.
    * Spot-check at least 1–2 cited `file:line` claims directly via `read_file` to separate verified defects from unverified hypotheses.
 4. **Chinese Risk Brief**:
-   * Present findings prioritized by severity (`P0/P1/P2/P3`) in clear natural Chinese following **Template A** in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (never paste raw Codex output).
+   * Present findings prioritized by severity (`P0/P1/P2/P3`) in calm, precise natural Chinese following the **heavyweight engineering / independent `review` route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (lead with verdict & verification watermark, state root cause without repeating the issue table, preserve exact `file:line` anchors, and never paste raw Codex output or internal metadata).

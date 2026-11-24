@@ -23,4 +23,4 @@ Execute strictly in order:
 5. **Stage 3 — Parallel Verification & Diff Review**:
    * Once local/CPU unit checks pass, run remote GPU/E2E tests (executed by Gemini Manager / `codex-worker`, never inside Codex) concurrently with local `run_codex.sh review --uncommitted --structured`.
 6. **Chinese Executive Brief**:
-   * Synthesize the verified architecture, patch map, `merge_check` + test results, and remaining decisions in natural Chinese following **Template A** in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`.
+   * Synthesize the verified architecture, behavioral/contract change map, verification watermark, and real pending gates/decisions in calm, precise natural Chinese following the **heavyweight engineering delivery route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (avoid cross-section repetition or raw orchestration metadata).

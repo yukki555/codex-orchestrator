@@ -7,7 +7,7 @@ description: >-
   analysis. Always use for new local code files, edits >10 lines, Codex QA, and /research /debate /analyze.
 ---
 
-# Codex Orchestrator (v3.0)
+# Codex Orchestrator (v3.1)
 
 Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity: Gemini acts as **Principal Manager, Collector & Decision-Maker**, while local **Codex CLI** acts as **High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst**.
 
@@ -72,9 +72,9 @@ Before replying to the user after any Codex run:
 2. **Layered Verification / Citation Spot-Checks**:
    * Code: If `codex-worker` (or Codex self-check) already verified unit tests and remote SHA-256 sync with real command outputs, Manager does not re-run identical CPU unit tests — instead spot-check 1–2 code edits (`read_file`) and run higher-tier gates (multi-GPU smoke / E2E).
    * Consult / Review / Research / Critique / Analyze: Confirm `structured_valid: true` and spot-check at least `2` cited `file:line`, `source_ids`, or raw metric locations directly, labeling verified facts vs inferences and `knowledge_gaps`.
-3. **Human-Readable Brief Rewrite**:
-   * **Hard Ban**: Never paste, echo, or mechanically translate Codex's raw `last_message.md` text/JSON to the user.
-   * Rewrite from scratch in clear, natural Chinese following [user-brief-template.md](./references/user-brief-template.md) (**Template A** for code/review; **Template B** for research/debate/analysis).
+3. **Human-Readable Brief Rewrite (Communication Charter v3.1)**:
+   * **Hard Ban**: Never paste, echo, or mechanically translate Codex's raw `last_message.md` text/JSON or internal orchestration metadata to the user.
+   * Rewrite from scratch in calm, precise, natural Chinese following the 5 iron rules and 4 task-weight dynamic routes (`consult`, lightweight code change, heavyweight engineering / `review`, and `research`/`critique`/`analyze`) in [user-brief-template.md](./references/user-brief-template.md).
 
 ## Invocation Examples
 

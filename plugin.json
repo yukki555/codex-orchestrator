@@ -1,8 +1,8 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "General-purpose Dual-Brain orchestration plugin for Google Antigravity (v3.0): Gemini plans, freezes research/data corpora, orchestrates codex-worker or Codex CLI across coding (/impl, /review, /dag) and research/red-team/analysis (/research, /debate, /analyze) with strict JSON schemas, layered verification, and clear Chinese briefs.",
-  "version": "3.0.0",
+  "description": "General-purpose Dual-Brain orchestration plugin for Google Antigravity (v3.1): Gemini plans, freezes research/data corpora, orchestrates codex-worker or Codex CLI across coding (/impl, /review, /dag) and research/red-team/analysis (/research, /debate, /analyze) with strict JSON schemas, layered verification, and the v3.1 dynamic Communication Charter.",
+  "version": "3.1.0",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
     "/impl Explore the codebase, write a Spec, delegate implementation to codex-worker / Codex CLI, verify, and brief me clearly",
