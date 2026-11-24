@@ -1,6 +1,10 @@
-# Codex Orchestrator (`v3.5.0`)
+# Codex Orchestrator (`v3.5.1`)
 
 A **Dual-Brain** orchestration plugin for **Google Antigravity** pairing **Gemini** (Principal Manager, Corpus Collector & Verifier) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across software engineering (`/impl`, `/review`, `/dag`) and deep research / red-team debate / experiment analysis (`/research`, `/debate`, `/analyze`).
+
+## What's New in `v3.5.1`
+
+The Headwind Reliability Patch cleans up descendant process groups on timeouts and cancellation, finds prior `resume` summaries in deep and custom output directories, and warns before resuming large or timed-out sessions.
 
 ## What's New in `v3.5.0` (Building on `v3.2.0`)
 
@@ -22,7 +26,7 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.5.0`) and icon (`agy plugin validate --strict` clean) |
+| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.5.1`) and icon (`agy plugin validate --strict` clean) |
 | `SPEC.md` | Behavioral specification (`v3.5`) for Session/Hands exit codes, patch custody, Proof-of-Work, and TDD |
 | `hooks.json` | Root `PreToolUse` hook registration (`codex-delegate-guard`, `strict` default + `pragmatic` opt-in) |
 | `rules/AGENTS.md` | Lean (`<= 30` lines) always-on Fold-First ladder, guardrails, and Communication Charter v3.1 pointer |

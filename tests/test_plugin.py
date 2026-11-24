@@ -91,7 +91,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
         self.assertEqual(plugin["displayName"], "Codex Orchestrator")
-        self.assertEqual(plugin["version"], "3.5.0")
+        self.assertEqual(plugin["version"], "3.5.1")
         self.assertEqual(json.loads(PROFILES.read_text(encoding="utf-8"))["version"], plugin["version"])
         self.assertEqual(plugin["logo"], "assets/logo.svg")
         self.assertTrue((ROOT / plugin["logo"]).is_file())
@@ -210,7 +210,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 "深度调研 / 红队辩论 / 实验核查",
             ),
             RULES: ("Communication Charter", "Dynamic Structure Routing", charter.name),
-            ROOT / "README.md": ("v3.5.0", "Communication Charter v3.1", charter.name),
+            ROOT / "README.md": ("v3.5.1", "Communication Charter v3.1", charter.name),
             SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.1", charter.name),
             SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.1", "lightweight route", charter.name),
             SKILLS / "review" / "SKILL.md": ("Communication Charter v3.1", "review", charter.name),
@@ -375,6 +375,80 @@ class AntigravityPluginTests(unittest.TestCase):
                 self.assertEqual(evaluate_guard_payload(gemini, host="gemini-cli", environ={}), expected)
 
 
+class SupervisorCleanupTests(unittest.TestCase):
+    def setUp(self):
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            from codex_orch import supervisor
+        self.supervisor = supervisor
+        self.process = mock.Mock(getpid=lambda: 10, getpgrp=lambda: 10)
+        elapsed = 0.0
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        for patcher in (
+            mock.patch.object(supervisor, "os", self.process),
+            mock.patch.object(supervisor, "time", mock.Mock(monotonic=lambda: elapsed, sleep=sleep)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def assert_signals(self, *, groups, pids=()):
+        for sender, expected in ((self.process.killpg, groups), (self.process.kill, pids)):
+            self.assertCountEqual([call.args for call in sender.call_args_list if call.args[1]], expected)
+
+    def test_group_cleanup_signals_each_group_once_and_rechecks_start_identity(self):
+        initial = {101: (100, 100, "a"), 102: (101, 102, "b"), 103: (102, 102, "c"),
+                   104: (100, 10, "d"), 105: (100, 105, "e")}
+        final = {**initial, 104: (1, 10, "reused"), 105: (1, 105, "reused"), 103: (1, 106, "c")}
+        with mock.patch.object(self.supervisor, "_read_process_table", side_effect=[initial, final]):
+            self.supervisor._terminate_group(100, 0, signal.SIGTERM)
+        self.assert_signals(groups=[(100, signal.SIGTERM), (102, signal.SIGTERM), (105, signal.SIGTERM),
+                                    (100, signal.SIGKILL), (102, signal.SIGKILL), (106, signal.SIGKILL)],
+                            pids=[(104, signal.SIGTERM)])
+
+    def test_group_cleanup_only_signals_new_targets_during_grace(self):
+        initial = {101: (100, 101, "a"), 102: (100, 10, "b")}
+        refreshed = {**initial, 103: (100, 100, "c"), 104: (101, 101, "d"),
+                     105: (103, 105, "e"), 106: (102, 10, "f")}
+        with mock.patch.object(self.supervisor, "_read_process_table", side_effect=[initial, refreshed, refreshed]):
+            self.supervisor._terminate_group(100, 0.3, signal.SIGTERM)
+        self.assert_signals(groups=[(100, signal.SIGTERM), (101, signal.SIGTERM), (105, signal.SIGTERM),
+                                    (100, signal.SIGKILL), (101, signal.SIGKILL), (105, signal.SIGKILL)],
+                            pids=[(102, signal.SIGTERM), (106, signal.SIGTERM),
+                                  (102, signal.SIGKILL), (106, signal.SIGKILL)])
+
+    def test_group_cleanup_falls_back_to_root_when_process_table_fails(self):
+        start = "Mon Nov 23 19:43:28 2026"
+        snapshot = subprocess.CompletedProcess([], 0, stdout=f" 101 100 101 {start}\n")
+        for failure in (subprocess.CompletedProcess([], 1), PermissionError()):
+            for first in (snapshot, failure):
+                with self.subTest(failure=type(failure).__name__, tracked=first is snapshot):
+                    self.process.reset_mock()
+                    self.process.environ = {"LC_ALL": "different"}
+                    with mock.patch.object(subprocess, "run", side_effect=[first, failure]) as run:
+                        self.supervisor._terminate_group(100, 0, signal.SIGTERM)
+                    groups = [(100, signal.SIGTERM), (100, signal.SIGKILL)]
+                    if first is snapshot:
+                        groups.append((101, signal.SIGTERM))
+                    self.assert_signals(groups=groups)
+                    self.assertEqual(run.call_count, 2)
+                    run.assert_called_with(["ps", "-Ao", "pid=,ppid=,pgid=,lstart="],
+                                           env={"LC_ALL": "C"}, stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL, text=True, timeout=2.0, check=False)
+
+    def test_group_cleanup_uses_verified_prior_samples_after_root_exits(self):
+        prior = {101: (101, "a"), 102: (102, "b"), 103: (103, "c")}
+        table = {101: (1, 105, "a"), 102: (1, 102, "reused")}
+        self.process.killpg.side_effect = [ProcessLookupError(), None]
+        self.process.kill.side_effect = ProcessLookupError
+        with mock.patch.object(self.supervisor, "_read_process_table", return_value=table) as read:
+            self.supervisor._terminate_group(100, 0, signal.SIGTERM, lambda: 0, prior_descendants=prior)
+        self.assert_signals(groups=[(105, signal.SIGTERM)])
+        read.assert_called_once()
+
+
 class CodexTestCase(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -430,7 +504,8 @@ class CodexTestCase(unittest.TestCase):
             for event in json.loads(os.environ.get("TEST_CODEX_EVENTS", "[]")):
                 print(event if isinstance(event, str) else json.dumps(event))
             print(json.dumps({"type": "turn.completed", "usage": {
-                "input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1,
+                "input_tokens": int(os.environ.get("TEST_CODEX_INPUT_TOKENS", "1")),
+                "cached_input_tokens": 0, "output_tokens": 1,
             }}))
             if stderr := os.environ.get("TEST_CODEX_STDERR"):
                 print(stderr, file=sys.stderr)
@@ -460,6 +535,84 @@ class CodexTestCase(unittest.TestCase):
 
     def _read_json(self, path):
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _separate_pgid_sleeper(self, *, root_exits=False):
+        table = self.temp / "process-table.txt"
+        self.addCleanup(self._kill_fixture_grandchild, table)
+        try:
+            subprocess.run(
+                ["ps", "-Ao", "pid=,ppid=,pgid=,lstart="], env=self.env, capture_output=True,
+                timeout=2, check=True,
+            )
+        except PermissionError:
+            # Managed sandboxes can block ps. Keep the targets live and fixture its output.
+            ps = self.temp / "ps"
+            ps.write_text(dedent(f"""\
+                #!/usr/bin/env python3
+                import sys
+                from pathlib import Path
+
+                assert sys.argv[1:] == ["-Ao", "pid=,ppid=,pgid=,lstart="]
+                print(Path({str(table)!r}).read_text(), end="")
+                """), encoding="utf-8")
+            ps.chmod(0o755)
+        child_code = dedent("""\
+            import signal
+            import sys
+            import time
+
+            def stop(*_):
+                print("detached child stopped", flush=True)
+                sys.exit(0)
+
+            signal.signal(signal.SIGTERM, stop)
+            time.sleep(30)
+            """)
+        return table, dedent(f"""\
+            import os
+            import signal
+            import subprocess
+            import sys
+            import time
+            from pathlib import Path
+
+            child = subprocess.Popen(
+                [sys.executable, "-B", "-c", {child_code!r}],
+                start_new_session=True, stdout=None if {root_exits!r} else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            def reap_child(*_):
+                child.wait()
+                sys.exit(0)
+
+            # Reap the grandchild after the supervisor signals it, even if PID 1 reaps slowly.
+            signal.signal(signal.SIGTERM, reap_child)
+            table = Path({str(table)!r})
+            pending = table.with_suffix(".tmp")
+            lstart = "Mon Nov 23 19:43:28 2026"
+            pending.write_text(
+                f"{{os.getpid()}} {{os.getppid()}} {{os.getpgrp()}} {{lstart}}\\n"
+                f"{{child.pid}} {{os.getpid()}} {{os.getpgid(child.pid)}} {{lstart}}\\n"
+            )
+            pending.replace(table)
+            time.sleep({1 if root_exits else 30})
+            """)
+
+    def _kill_fixture_grandchild(self, table):
+        if table.exists():
+            pid = int(table.read_text(encoding="utf-8").splitlines()[1].split()[0])
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+    def _assert_separate_pgid_child_reclaimed(self, table):
+        root, grandchild = [list(map(int, row.split(None, 3)[:3]))
+                            for row in table.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(grandchild[1], root[0])
+        self.assertNotEqual(grandchild[2], root[2])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(grandchild[0], 0)
+        table.unlink()
 
     def _wrapper_command(self, script, *args):
         return ["bash", str(SCRIPTS / script), *map(str, args), "--out-dir", str(self.out)]
@@ -933,6 +1086,15 @@ class CodexWrapperTests(CodexTestCase):
         self.assertIs(summary["cancelled"], False)
         self.assertIsNone(summary["signal"])
 
+    def test_supervisor_cleans_sampled_separate_group_after_clean_root_exit(self):
+        table, sleeper = self._separate_pgid_sleeper(root_exits=True)
+        self._stub_action(sleeper)
+        self._consult()
+        self.assertIn("detached child stopped", (self.out / "events.jsonl").read_text(encoding="utf-8"))
+        summary = self._read_json(self.out / "summary.json")
+        self.assertEqual((summary["status"], summary["codex_exit_code"]), ("ok", 0))
+        table.unlink()
+
     def test_run_codex_stall_timeout_stops_silent_child(self):
         self._stub_action("import time\ntime.sleep(10)\n")
         self._consult("--stall-timeout", 1, exit_code=125)
@@ -941,6 +1103,14 @@ class CodexWrapperTests(CodexTestCase):
         self.assertEqual(summary["exit_code"], 125)
         self.assertEqual(summary["codex_exit_code"], -signal.SIGTERM)
         self.assertIs(summary["stall_timed_out"], True)
+
+    def test_run_codex_stall_timeout_reclaims_separate_pgid_grandchild(self):
+        table, sleeper = self._separate_pgid_sleeper()
+        self._stub_action(sleeper)
+        self._consult("--stall-timeout", 1, exit_code=125)
+        summary = self._read_json(self.out / "summary.json")
+        self.assertEqual((summary["status"], summary["exit_code"]), ("stall_timeout", 125))
+        self._assert_separate_pgid_child_reclaimed(table)
 
     def test_run_codex_streaming_activity_resets_stall_timeout(self):
         self.env["TEST_CODEX_HEARTBEATS"] = "5"
@@ -1046,33 +1216,159 @@ class CodexWrapperTests(CodexTestCase):
             self.assertEqual((self.out / name).read_bytes(), (second / name).read_bytes())
         self.assertEqual(sorted(path.name for path in attempts.glob("attempt-*")), [first.name, second.name])
 
-    def test_resume_with_id_ignores_nested_attempt_summaries(self):
+    def test_resume_inherits_model_and_dirs_from_deep_and_external_summaries(self):
         runs = self.temp / "runs"
-        self.out = runs / "prior"
-        self._consult("--model", "current-model")
-        nested = self.out / "attempts" / "attempt-001" / "summary.json"
-        data = self._read_json(nested)
-        data["model"] = "historical-model"
-        data["add_dirs"] = [str(self.corpus)]
-        nested.write_text(json.dumps(data), encoding="utf-8")
-        os.utime(self.out / "summary.json", (1, 1))
-        self.assertGreater(nested.stat().st_mtime, (self.out / "summary.json").stat().st_mtime)
+        writable = self.temp / "extra writable dir"
+        writable.mkdir()
+        for name, prior_dir, resume_dir in (
+            ("deep", runs / "job" / "out with space" / "worker" / "round1", runs / "resume"),
+            ("external", self.temp / "nested_job" / "round1", self.temp / "nested_job" / "round2"),
+        ):
+            with self.subTest(location=name):
+                thread_id = f"test-thread-{name}"
+                prior = prior_dir / "summary.json"
+                prior.parent.mkdir(parents=True)
+                data = {"thread_id": thread_id, "model": "gpt-6.2-sol", "add_dirs": [str(writable)]}
+                prior.write_text(json.dumps(data), encoding="utf-8")
+                os.utime(prior, (1, 1))
+                nested = prior_dir / "attempts" / "attempt-001" / "summary.json"
+                nested.parent.mkdir(parents=True)
+                nested.write_text(json.dumps({**data, "model": "gpt-6.2-astra", "add_dirs": []}),
+                                  encoding="utf-8")
+                self.assertGreater(nested.stat().st_mtime, prior.stat().st_mtime)
 
-        self.out = self.temp / "resume"
-        # Point the normal resume entry point at an isolated discovery root.
-        command = [
-            sys.executable, "-I", "-B", "-c",
-            "import sys\nfrom pathlib import Path\n"
-            "sys.path.insert(0, sys.argv.pop(1))\nfrom codex_orch import single_runner\n"
-            "single_runner.RUNS_DIR = Path(sys.argv.pop(1))\nsys.exit(single_runner.main())",
-            str(SCRIPTS), str(runs), "resume", "--id", data["thread_id"], "--dir", str(self.corpus),
-            "--sandbox", "workspace-write", "--prompt", "Continue.", "--out-dir", str(self.out),
-        ]
-        result = subprocess.run(command, cwd=self.temp, env=self.env, capture_output=True, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
-        summary = self._read_json(self.out / "summary.json")
-        self.assertEqual((summary["model"], summary["add_dirs"]), ("current-model", []))
-        self.assertIn(data["thread_id"], self._read_json(self.out / "codex-argv.json"))
+                self.out = resume_dir
+                args = ("resume", "--id", thread_id, "--dir", str(self.corpus), "--sandbox", "workspace-write",
+                        "--speed", "ultrafast", "--prompt", "Continue.")
+                if name == "deep":
+                    command = [
+                        sys.executable, "-I", "-B", "-c",
+                        "import sys\nfrom pathlib import Path\n"
+                        "sys.path.insert(0, sys.argv.pop(1))\nfrom codex_orch import single_runner\n"
+                        "single_runner.RUNS_DIR = Path(sys.argv.pop(1))\nsys.exit(single_runner.main())",
+                        str(SCRIPTS), str(runs), *args, "--out-dir", str(self.out),
+                    ]
+                    result = subprocess.run(command, cwd=self.temp, env=self.env, capture_output=True,
+                                            text=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    result = self._run_wrapper("run_codex.sh", *args)
+                summary = self._read_json(self.out / "summary.json")
+                self.assertEqual((summary["model"], summary["speed"], summary["add_dirs"]),
+                                 ("gpt-6.2-sol", "ultrafast", [str(writable)]))
+                self.assertEqual(summary["prior_session"]["summary_json"], str(prior))
+                self.assertNotIn("downgrading speed", result.stderr)
+                argv = self._read_json(self.out / "codex-argv.json")
+                self.assertIn(thread_id, argv)
+                self.assertIn('service_tier="ultrafast"', argv)
+                self.assertIn(f"sandbox_workspace_write.writable_roots={json.dumps([str(self.corpus), str(writable)])}",
+                              argv)
+
+    def test_prior_session_rejects_excluded_and_symlinked_output_paths(self):
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            from codex_orch import single_runner
+
+        external = self.temp / "external"
+        actual = external / "actual"
+        for directory in (actual, self.temp / "attempts" / "old", self.temp / "_worktrees" / "old"):
+            directory.mkdir(parents=True)
+            (directory / "summary.json").write_text(json.dumps({
+                "thread_id": "test-thread", "model": "gpt-6.2-sol", "add_dirs": [str(self.corpus)],
+            }), encoding="utf-8")
+        symlink = self.temp / "alias-location" / "linked"
+        symlink.parent.mkdir()
+        symlink.symlink_to(actual, target_is_directory=True)
+        symlink_parent = self.temp / "linked-parent"
+        symlink_parent.symlink_to(external, target_is_directory=True)
+
+        with mock.patch.object(single_runner, "RUNS_DIR", self.temp / "runs"):
+            for directory in (self.temp / "attempts" / "old", self.temp / "_worktrees" / "old",
+                              symlink, symlink_parent / "actual", symlink_parent / "sibling"):
+                with self.subTest(directory=directory):
+                    self.assertIsNone(single_runner.prior_session(
+                        "test-thread", inherit_dirs=True, out_dir=directory,
+                    ))
+
+    def test_prior_session_validates_attempt_summary_path(self):
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            from codex_orch import single_runner
+
+        summary = self.out / "summary.json"
+        attempt_dir = self.out / "attempts" / "attempt-001"
+        attempt_dir.mkdir(parents=True)
+        immutable = attempt_dir / "summary.json"
+        immutable.touch()
+        outside = self.temp / "outside.json"
+        outside.touch()
+        symlink = attempt_dir / "symlink.json"
+        symlink.symlink_to(immutable)
+
+        with mock.patch.object(single_runner, "RUNS_DIR", self.temp / "runs"):
+            for fields, expected in (
+                ({"attempt_dir": str(attempt_dir)}, immutable),
+                ({"attempt_artifacts": {"summary_json": str(symlink)}}, summary),
+                ({"attempt_artifacts": {"summary_json": str(outside)}}, summary),
+            ):
+                with self.subTest(fields=fields):
+                    summary.write_text(json.dumps({"thread_id": "test-thread", **fields}), encoding="utf-8")
+                    prior = single_runner.prior_session("test-thread", inherit_dirs=False, out_dir=self.out)
+                    self.assertEqual(prior.summary_path, str(expected))
+
+    def test_resume_reusing_output_links_prior_immutable_summary(self):
+        self.env.update(TEST_CODEX_EXIT="17", TEST_CODEX_INPUT_TOKENS="123")
+        self._consult(exit_code=17)
+        first = self.out / "attempts" / "attempt-001" / "summary.json"
+        original = first.read_bytes()
+
+        self.env.update(TEST_CODEX_EXIT="0", TEST_CODEX_INPUT_TOKENS="456")
+        self._run_wrapper("run_codex.sh", "resume", "--id", "test-thread", "--dir", self.corpus,
+                          "--prompt", "Continue.")
+        latest = self._read_json(self.out / "summary.json")
+        self.assertEqual((latest["attempt_num"], latest["status"], latest["tokens"]["input"]), (2, "ok", 456))
+        self.assertEqual(latest["prior_session"], {
+            "summary_json": str(first), "status": "error", "input_tokens": 123,
+        })
+        self.assertEqual(first.read_bytes(), original)
+        prior = self._read_json(Path(latest["prior_session"]["summary_json"]))
+        self.assertEqual((prior["attempt_num"], prior["status"], prior["tokens"]["input"]), (1, "error", 123))
+
+    def test_resume_bloat_warning_is_advisory(self):
+        for status, tokens, reasons in (
+            ("ok", 1_000_000, ["prior input tokens (1,000,000) >= 1,000,000"]),
+            ("ok", 1_250_000, ["prior input tokens (1,250,000) >= 1,000,000"]),
+            ("stall_timeout", 0, ["prior session ended with status 'stall_timeout'"]),
+            ("timeout", 0, ["prior session ended with status 'timeout'"]),
+            ("timeout", 1_000_000, ["prior input tokens (1,000,000) >= 1,000,000",
+                                    "prior session ended with status 'timeout'"]),
+            ("ok", 120_000, []),
+        ):
+            with self.subTest(status=status, tokens=tokens):
+                parent = self.temp / f"{status}-{tokens}"
+                self.out = parent / "round2"
+                prior = parent / "round1" / "summary.json"
+                prior.parent.mkdir(parents=True)
+                thread_id = f"test-thread-{status}-{tokens}"
+                prior.write_text(json.dumps({
+                    "thread_id": thread_id, "status": status, "tokens": {"input": tokens},
+                }), encoding="utf-8")
+
+                result = self._run_wrapper("run_codex.sh", "resume", "--id", thread_id, "--dir", self.corpus,
+                                           "--prompt", "Continue.")
+                summary = self._read_json(self.out / "summary.json")
+                self.assertEqual(summary["exit_code"], 0)
+                self.assertIs(summary["resume_bloat_warning"], bool(reasons))
+                self.assertEqual(summary["prior_session"], {
+                    "summary_json": str(prior), "status": status, "input_tokens": tokens,
+                })
+                if reasons:
+                    self.assertEqual(summary["resume_bloat_reasons"], reasons)
+                    joined = ", ".join(reasons)
+                    self.assertIn(f"warning: resuming thread {thread_id} despite {joined};", result.stderr)
+                    self.assertIn(f"tip: resume bloat warning ({joined})", result.stdout)
+                else:
+                    self.assertNotIn("resume_bloat_reasons", summary)
+                    self.assertNotIn("warning: resuming", result.stderr)
+                    self.assertNotIn("tip: resume bloat warning", result.stdout)
 
     def test_run_codex_rejects_in_place_self_hosting_before_artifacts(self):
         for target, flags in (
@@ -1829,6 +2125,22 @@ class AppTests(unittest.TestCase):
                 with suppress(ProcessLookupError):
                     os.kill(int(lock.readline()), signal.SIGKILL)
                 self.fail("the verification grandchild still holds the lock")
+
+    def test_host_verification_timeout_reclaims_separate_pgid_grandchild(self):
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            from codex_orch import verify
+
+        table, sleeper = self._separate_pgid_sleeper()
+        with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):
+            proof = verify.run_host_verification(
+                self.repo, base_oid=self.base_oid, patches=[], expected_tree_oid=None,
+                verify_argv=[sys.executable, "-B", "-c", sleeper],
+                out_path=self.temp / "verification.json", worktrees_parent=self.temp / "verify-worktrees",
+                timeout_s=1,
+            )
+        self.assertIs(proof["timed_out"], True, proof)
+        self.assertEqual(proof["exit_code"], 124)
+        self._assert_separate_pgid_child_reclaimed(table)
 
     def test_host_verification_reports_cleanup_error_after_success(self):
         with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):

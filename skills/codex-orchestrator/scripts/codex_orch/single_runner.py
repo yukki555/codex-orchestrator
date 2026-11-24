@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import fcntl
-import glob
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,9 +22,11 @@ from . import compact_stdout, env, schema_check, supervisor
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = Path("/tmp/codex-orchestrator")
+RESUME_BLOAT_TOKEN_THRESHOLD = 1_000_000
+_SESSION_SEARCH_EXCLUDED_DIRS = {"attempts", "_worktrees", ".git", "__pycache__", "node_modules"}
 MODES = ("consult", "implement", "review", "resume", "research", "critique", "analyze")
 
-USAGE = """run_codex.sh v3.5.0
+USAGE = """run_codex.sh v3.5.1
 
 Usage:
   run_codex.sh consult   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
@@ -280,18 +282,111 @@ def read_json(path):
         return json.load(stream)
 
 
-def prior_session(thread_id, *, inherit_dirs):
-    candidates = []
-    for depth in range(1, 4):
-        for name in glob.iglob(str(RUNS_DIR) + "/*" * depth + "/summary.json"):
-            path = Path(name)
-            if "attempts" in path.relative_to(RUNS_DIR).parts[:-1]:
-                continue
-            try:
-                candidates.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
-    for _, path in sorted(candidates, reverse=True):
+@dataclass
+class PriorSession:
+    model: str
+    add_dirs: list[str]
+    input_tokens: int
+    status: str
+    summary_path: str
+
+
+def _session_summaries(root: Path, *, max_depth: int):
+    if root.is_symlink():
+        return
+    for directory, dirnames, filenames in os.walk(root):
+        path = Path(directory)
+        if len(path.relative_to(root).parts) >= max_depth:
+            dirnames.clear()
+        else:
+            dirnames[:] = [
+                name for name in dirnames
+                if name not in _SESSION_SEARCH_EXCLUDED_DIRS and not (path / name).is_symlink()
+            ]
+        if "summary.json" in filenames:
+            yield path / "summary.json"
+
+
+def _prior_input_tokens(data: dict) -> int:
+    tokens = data.get("tokens")
+    raw = tokens.get("input") if isinstance(tokens, dict) else None
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _has_unsafe_session_path(path: Path) -> bool:
+    path = path.absolute()
+    if _SESSION_SEARCH_EXCLUDED_DIRS.intersection(path.parts):
+        return True
+    anchors = {RUNS_DIR, Path.home(), Path(tempfile.gettempdir()),
+               Path("/tmp"), Path("/private/tmp"), Path("/var"), Path("/private/var"), Path("/")}
+    try:
+        for component in (path, *path.parents):
+            if component == RUNS_DIR:
+                return component.is_symlink()
+            if component in anchors:
+                break
+            if component.is_symlink():
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _immutable_summary_path(path: Path, data: dict) -> str:
+    artifacts = data.get("attempt_artifacts")
+    summary = artifacts.get("summary_json") if isinstance(artifacts, dict) else None
+    attempt_dir = data.get("attempt_dir")
+    if isinstance(summary, str) and summary:
+        candidate = Path(summary)
+    elif isinstance(attempt_dir, str) and attempt_dir:
+        candidate = Path(attempt_dir) / "summary.json"
+    else:
+        return str(path)
+    try:
+        if (stat.S_ISREG(candidate.lstat().st_mode)
+                and (path.parent / "attempts").resolve() in candidate.resolve().parents):
+            return str(candidate)
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return str(path)
+
+
+def prior_session(thread_id, *, inherit_dirs, out_dir: Path | None = None) -> PriorSession | None:
+    candidates = {}
+
+    def consider(path):
+        if _SESSION_SEARCH_EXCLUDED_DIRS.intersection(path.parent.parts):
+            return
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode):
+                candidates[path.resolve()] = info.st_mtime
+        except (OSError, RuntimeError):
+            pass
+
+    for path in _session_summaries(RUNS_DIR, max_depth=8):
+        consider(path)
+    if out_dir is not None and not _has_unsafe_session_path(out_dir):
+        consider(out_dir / "summary.json")
+    if out_dir is not None and not _has_unsafe_session_path(out_dir.parent):
+        try:
+            parent = out_dir.parent.resolve()
+            runs = RUNS_DIR.resolve()
+            broad_roots = {Path("/"), Path("/tmp").resolve(), Path(tempfile.gettempdir()).resolve(),
+                           Path.home().resolve()}
+        except (OSError, RuntimeError):
+            pass
+        else:
+            if parent not in broad_roots and parent != runs and runs not in parent.parents and parent.is_dir():
+                for path in _session_summaries(parent, max_depth=3):
+                    consider(path)
+
+    for path in sorted(candidates, key=lambda path: (candidates[path], path), reverse=True):
         try:
             data = read_json(path)
         except (OSError, ValueError, RecursionError):
@@ -303,8 +398,11 @@ def prior_session(thread_id, *, inherit_dirs):
             dirs = data.get("add_dirs")
             if not inherit_dirs or not isinstance(dirs, list):
                 dirs = []
-            return model, list(dict.fromkeys(d for d in dirs if isinstance(d, str) and os.path.isdir(d)))
-    return "", []
+            add_dirs = list(dict.fromkeys(d for d in dirs if isinstance(d, str) and os.path.isdir(d)))
+            status = data.get("status")
+            return PriorSession(model, add_dirs, _prior_input_tokens(data),
+                                status if isinstance(status, str) else "", _immutable_summary_path(path, data))
+    return None
 
 
 @dataclass
@@ -414,6 +512,8 @@ class Run:
     speed: str
     speed_explicit: bool
     host: HostPolicy | None
+    prior: PriorSession | None
+    bloat_reasons: list[str]
 
 
 def preflight(options):
@@ -508,24 +608,37 @@ def preflight(options):
 
     out = Path(options.out_dir or RUNS_DIR / f"{options.mode}-{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}").absolute()
     host = preflight_host(options, target, inside_worktree, out)
-    prior_model = ""
+    prior = None
+    bloat_reasons = []
     if options.mode == "resume" and options.id:
-        prior_model, inherited_dirs = prior_session(
+        prior = prior_session(
             options.id, inherit_dirs=options.sandbox == "workspace-write" and not options.add_dir,
+            out_dir=out if options.out_dir else None,
         )
-        options.add_dir.extend(inherited_dirs)
+        if prior is not None:
+            options.add_dir.extend(prior.add_dirs)
+            if prior.input_tokens >= RESUME_BLOAT_TOKEN_THRESHOLD:
+                bloat_reasons.append(
+                    f"prior input tokens ({prior.input_tokens:,}) >= {RESUME_BLOAT_TOKEN_THRESHOLD:,}"
+                )
+            if prior.status in ("timeout", "stall_timeout"):
+                bloat_reasons.append(f"prior session ended with status '{prior.status}'")
     speed_explicit = bool(options.speed)
     model, effort, speed, warnings = profiles.resolve_execution_profile(
         config, mode=options.mode, model=options.model or None, effort=options.effort or None,
         speed=options.speed or None, speed_explicit=speed_explicit, fast_mode=options.fast,
-        profile_name=options.profile or None, prior_model=prior_model or None,
+        profile_name=options.profile or None, prior_model=(prior.model or None) if prior else None,
     )
     executable = shutil.which("codex") or shutil.which("/opt/homebrew/bin/codex")
     if not executable:
         raise FileNotFoundError("'codex' binary not found in PATH or /opt/homebrew/bin/codex")
     for warning in warnings:
         print(warning, file=sys.stderr)
-    return Run(options, target, out, is_git, executable, model, effort, speed, speed_explicit, host)
+    if bloat_reasons:
+        print(f"warning: resuming thread {options.id} despite {', '.join(bloat_reasons)}; "
+              "prefer a fresh implement/consult run to avoid context bloat.", file=sys.stderr)
+    return Run(options, target, out, is_git, executable, model, effort, speed, speed_explicit, host,
+               prior, bloat_reasons)
 
 
 @dataclass
@@ -1103,6 +1216,9 @@ def announce(summary, preview, schema_error, event_errors, stderr_tail):
     if summary["stderr_errors"] and not summary["no_mcp"]:
         print(f"tip: stderr reported {summary['stderr_errors']} error(s) with --with-mcp enabled; "
               "retry with default --no-mcp or --ignore-user-config")
+    if summary.get("resume_bloat_warning") is True:
+        print(f"tip: resume bloat warning ({', '.join(summary['resume_bloat_reasons'])}); "
+              "prefer a fresh implement/consult run")
     progress = summary.get("partial_progress", {})
     if any(progress.values()):
         print("--- partial_progress ---")
@@ -1166,6 +1282,15 @@ def summarize(run, attempt, result, meta, proof, last_message, structured_valid,
         "attempt_artifacts": {key: str(attempt.file(name)) for key, name in ARTIFACT_NAMES.items()
                               if key == "summary_json" or attempt.file(name).is_file()},
     }
+    if opts.mode == "resume":
+        summary["resume_bloat_warning"] = bool(run.bloat_reasons)
+        if run.bloat_reasons:
+            summary["resume_bloat_reasons"] = run.bloat_reasons
+        if run.prior is not None:
+            summary["prior_session"] = {
+                "summary_json": run.prior.summary_path, "status": run.prior.status,
+                "input_tokens": run.prior.input_tokens,
+            }
     if proof is not None:
         summary.update(proof.metadata)
     if status != "ok":

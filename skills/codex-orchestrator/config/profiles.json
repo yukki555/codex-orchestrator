@@ -1,5 +1,5 @@
 {
-  "version": "3.5.0",
+  "version": "3.5.1",
   "valid_modes": ["consult", "implement", "review", "resume", "research", "critique", "analyze"],
   "valid_efforts": ["low", "medium", "high", "xhigh", "max", "ultra", "inherit"],
   "valid_speeds": ["default", "fast", "ultrafast", "inherit"],

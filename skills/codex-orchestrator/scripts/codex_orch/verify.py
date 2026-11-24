@@ -17,7 +17,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 from .env import build_child_env, redact_secrets
-from .supervisor import terminate_process_group
+from .supervisor import _process_needs_cleanup, terminate_process_group
 
 CONTRACT_FILENAME = ".codex-orchestrator.json"
 ALLOWED_CONTRACT_KEYS = frozenset({
@@ -327,12 +327,8 @@ def _run_verify_command(argv: list[str], worktree: Path, cwd: Path, timeout_s: i
             timed_out = True
             exit_code = 124
         finally:
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                terminate_process_group(proc.pid)
+            if _process_needs_cleanup(proc):
+                terminate_process_group(proc.pid, reap=proc.poll)
             proc.wait()
         if exit_code < 0:
             exit_code = 128 - exit_code

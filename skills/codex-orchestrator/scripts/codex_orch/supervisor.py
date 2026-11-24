@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from contextlib import ExitStack
 from pathlib import Path
@@ -47,41 +48,155 @@ def classify_quota_error(events_text: str, stderr_text: str) -> bool:
     return _classify_quota_lines(events_text.split("\n"), (stderr_text,))
 
 
-def _terminate_group(pgid, grace_s, initial_signal, reap=None):
+def _read_process_table() -> dict[int, tuple[int, int, str]] | None:
     try:
-        os.killpg(pgid, initial_signal)
-    except ProcessLookupError:
-        return
+        result = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid=,pgid=,lstart="], env={**os.environ, "LC_ALL": "C"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=2.0, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
 
-    deadline = time.monotonic() + grace_s
-    kill_deadline = deadline + 0.25
-    while True:
-        if reap is not None:
-            reap()
+    table = {}
+    for line in result.stdout.splitlines():
         try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            # A group with only exiting processes can be visible but unsignalable.
+            pid, ppid, pgid, lstart = line.split(None, 3)
+            table[int(pid)] = (int(ppid), int(pgid), lstart.strip())
+        except ValueError:
+            continue
+    return table
+
+
+def _snapshot_descendants(root_pid: int, table=None) -> dict[int, tuple[int, str]]:
+    if table is None:
+        table = _read_process_table()
+    if table is None:
+        return {}
+
+    children = defaultdict(list)
+    for pid, (ppid, _, _) in table.items():
+        children[ppid].append(pid)
+
+    pending = deque([root_pid])
+    descendants = {}
+    own_pid = os.getpid()
+    while pending:
+        for pid in children[pending.popleft()]:
+            if pid > 1 and pid not in (root_pid, own_pid) and pid not in descendants:
+                _, pgid, lstart = table[pid]
+                descendants[pid] = (pgid, lstart)
+                pending.append(pid)
+    return descendants
+
+
+def _signal_targets(root_pgid: int | None, descendants: dict[int, tuple[int, str]], sig):
+    own_pgid = os.getpgrp()
+    pgids = {pgid for pgid, _ in descendants.values() if pgid > 1 and pgid != own_pgid}
+    if root_pgid is not None and root_pgid > 1 and root_pgid != own_pgid:
+        pgids.add(root_pgid)
+    signaled_pgids = set()
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, sig)
+            signaled_pgids.add(pgid)
+        except (ProcessLookupError, PermissionError):
             pass
-        now = time.monotonic()
-        if now >= deadline:
+    own_pid = os.getpid()
+    signaled_pids = set()
+    for pid, (pgid, lstart) in descendants.items():
+        if pgid not in signaled_pgids and pid > 1 and pid != own_pid:
             try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-            except PermissionError:
-                if reap is not None and reap() is None:
-                    raise
+                os.kill(pid, sig)
+                signaled_pids.add((pid, lstart))
+            except (ProcessLookupError, PermissionError):
+                pass
+    return signaled_pgids, signaled_pids
+
+
+def _target_exists(send_signal, target):
+    try:
+        send_signal(target, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def _process_needs_cleanup(proc):
+    return proc.poll() is None or _target_exists(os.killpg, proc.pid)
+
+
+def _matching_descendants(descendants, table):
+    return {
+        pid: (table[pid][1], lstart) for pid, (_, lstart) in descendants.items()
+        if pid in table and table[pid][2] == lstart
+    }
+
+
+def _terminate_group(root_pid, grace_s, initial_signal, reap=None, prior_descendants=None):
+    # Capture separate groups before signaling their parent and losing the PPID links.
+    table = _read_process_table()
+    root_alive = reap is None or reap() is None
+    root_pgid = root_pid if root_pid > 1 and root_pid != os.getpgrp() else None
+    if root_pgid is not None and not root_alive and not _target_exists(os.killpg, root_pgid):
+        root_pgid = None
+    tracked: dict[int, tuple[int, str]] = {}
+    if table is not None:
+        tracked = _matching_descendants(prior_descendants or {}, table)
+        if root_alive:
+            tracked.update(_snapshot_descendants(root_pid, table))
+    signaled_pgids, signaled_pids = _signal_targets(root_pgid, tracked, initial_signal)
+
+    last_snapshot = time.monotonic()
+    deadline = last_snapshot + grace_s
+    kill_deadline = None
+    while True:
+        root_alive = reap is None or reap() is None
+        tracked = {pid: identity for pid, identity in tracked.items() if _target_exists(os.kill, pid)}
+        if root_pgid is not None and not _target_exists(os.killpg, root_pgid):
+            root_pgid = None
+        if root_pgid is None and not tracked:
+            return
+        now = time.monotonic()
+        if kill_deadline is not None:
             # A zombie grandchild can keep its group visible until its own parent reaps it.
             if now >= kill_deadline:
                 return
+        elif now >= deadline or ((root_alive or tracked) and now - last_snapshot >= 0.2):
+            table = _read_process_table()
+            new = {}
+            if table is not None:
+                tracked = _matching_descendants(tracked, table)
+                seeds = ([root_pid] if root_alive else []) + list(tracked)
+                for seed in seeds:
+                    for pid, identity in _snapshot_descendants(seed, table).items():
+                        if pid not in tracked:
+                            new[pid] = identity
+                tracked.update(new)
+            if now >= deadline:
+                if table is None:
+                    tracked.clear()
+                _signal_targets(root_pgid, tracked, signal.SIGKILL)
+                kill_deadline = time.monotonic() + 0.25
+                continue
+            unsignaled = {
+                pid: (pgid, lstart) for pid, (pgid, lstart) in new.items()
+                if pgid not in signaled_pgids and (pid, lstart) not in signaled_pids
+            }
+            if unsignaled:
+                new_groups, new_pids = _signal_targets(None, unsignaled, initial_signal)
+                signaled_pgids.update(new_groups)
+                signaled_pids.update(new_pids)
+            last_snapshot = time.monotonic()
         time.sleep(0.02)
 
 
-def terminate_process_group(pgid, grace_s=2.0):
-    _terminate_group(pgid, grace_s, signal.SIGTERM)
+def terminate_process_group(pgid, grace_s=2.0, *, reap=None):
+    _terminate_group(pgid, grace_s, signal.SIGTERM, reap)
 
 
 def _drain_pipe(pipe, output, on_chunk, stop_reading, errors):
@@ -140,6 +255,8 @@ def run_supervised(
             env=build_child_env(inherit_all=inherit_env), start_new_session=True,
         ))
         readers = []
+        observed_descendants = {}
+        last_snapshot = start_mono
         try:
             for pipe, output, on_chunk in (
                 (proc.stdout, events, mark_activity), (proc.stderr, stderr, None),
@@ -155,7 +272,9 @@ def run_supervised(
             while True:
                 if received_signal is not None or not errors.empty():
                     break
-                if proc.poll() is not None and not any(reader.is_alive() for reader in readers):
+                root_alive = proc.poll() is None
+                # A sampled descendant can keep the output pipes open after the root exits.
+                if not root_alive and (observed_descendants or not any(reader.is_alive() for reader in readers)):
                     break
                 with activity_lock:
                     now = time.monotonic()
@@ -166,14 +285,14 @@ def run_supervised(
                 if stall_timeout_s > 0 and idle_s >= stall_timeout_s:
                     timed_out = stall_timed_out = True
                     break
+                if root_alive and now - last_snapshot >= 0.5:
+                    observed_descendants.update(_snapshot_descendants(proc.pid))
+                    last_snapshot = time.monotonic()
                 time.sleep(0.02)
         finally:
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                _terminate_group(proc.pid, 2.0, received_signal or signal.SIGTERM, proc.poll)
+            if _process_needs_cleanup(proc) or observed_descendants:
+                _terminate_group(proc.pid, 2.0, received_signal or signal.SIGTERM, proc.poll,
+                                 prior_descendants=observed_descendants)
             stop_reading.set()
             for reader in readers:
                 reader.join()
