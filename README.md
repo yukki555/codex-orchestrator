@@ -19,7 +19,7 @@ flowchart LR
   * **Coding**: `implement`, `consult`, `review`, `resume` with `codex-output-schema.json`, managed Git worktrees + `changes.patch` + stacked `merge_check`, and `PreToolUse` `codex-delegate-guard`.
   * **Research / Red-Team / Data Analysis**: `research`, `critique`, `analyze` (read-only sandbox, works in non-Git `corpus/` directories) with dedicated strict JSON schemas (`research-output-schema.json`, `critique-output-schema.json`, `analysis-output-schema.json`), `--image` chart/figure attachment, and opt-in `--web-search` (`codex --search exec`).
 * **Lower Latency in Terminal (`agy` CLI)**: Invoke `run_codex.sh` and `run_codex_parallel.sh` directly via `run_command` for single-shot or DAG parallel tasks, reserving `codex-worker` for multi-round repair loops or remote SSH/GPU logs.
-* **Zero-Intrusion Codex Execution**: Defaults to `--ignore-user-config` and `--ignore-rules` (reusing `~/.codex` login while preserving Codex Desktop settings), offline frozen corpora by default, `low`/`medium` effort -> `service_tier="fast"`, and `partial_progress` telemetry.
+* **Zero-Intrusion Codex Execution**: Defaults to `--ignore-user-config` and `--ignore-rules` (reusing `~/.codex` login while preserving Codex Desktop settings), offline frozen corpora by default, `low`/`medium` effort -> `service_tier="ultrafast"` on `gpt-6.2-sol` and `service_tier="fast"` on `gpt-6.2-astra` (`high`+ defaults to `default`), and `partial_progress` telemetry.
 
 ## Prerequisites & Installation
 
@@ -81,7 +81,7 @@ Or launch one-off Turbo sessions via `agy --dangerously-skip-permissions`.
 ```bash
 SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
 
-# 1. Default medium+fast structured implementation
+# 1. Default medium+ultrafast structured implementation (gpt-6.2-sol)
 "$SCRIPTS/run_codex.sh" implement \
   --dir "/path/to/repo" --add-dir "/path/to/tests" \
   --structured --timeout 240 \
