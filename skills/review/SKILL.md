@@ -5,7 +5,7 @@ description: Run a single-pass structured Codex CLI review on uncommitted Git ch
 
 # Single-Pass Structured Git Diff Review (`/review`)
 
-Act as **Principal Engineering Manager** in Antigravity CLI (`agy`) running an independent structured Git QA review via `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh`.
+Act as **Principal Engineering Manager** in Google Antigravity running an independent structured Git QA review via `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex.sh`.
 
 Execute strictly in order:
 

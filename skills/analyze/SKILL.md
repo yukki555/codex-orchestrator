@@ -8,12 +8,12 @@ description: >-
 
 # Experiment, Data & Paper-Code Consistency Analysis (`/analyze`)
 
-Act as **Principal Research & Systems Analyst** orchestrating **Gemini (remote/local log & figure collection, synthesis)** + **Codex `gpt-6.2-astra` (`analyze` read-only quantitative audit)** to verify whether theory/papers, source code, and observed experiment metrics actually agree.
+Act as **Principal Research & Systems Analyst** in Google Antigravity orchestrating **Gemini (remote/local log & figure collection, synthesis)** + **Codex `gpt-6.2-astra` (`analyze` read-only quantitative audit)** to verify whether theory/papers, source code, and observed experiment metrics actually agree.
 
 Execute strictly in order:
 
 1. **Collect Artifacts & Freeze Read-Only Corpus**:
-   * Keep Codex **local-only**: if metrics, training logs, checkpoints metadata, or plots live on remote SSH/GPU hosts, Gemini (or `codex-worker`) fetches compact excerpts/CSVs/JSONs/PNGs into `/tmp/codex-orchestrator/<task-id>/corpus/` first.
+   * Keep Codex **local-only**: if metrics, training logs, checkpoint metadata, or plots live on remote SSH/GPU hosts, Gemini (or `codex-worker`) fetches compact excerpts/CSVs/JSONs/PNGs into `/tmp/codex-orchestrator/<task-id>/corpus/` first.
    * Record provenance (host, path, run ID, commit hash, timestamp) in `/tmp/codex-orchestrator/<task-id>/corpus/sources_index.json`.
 2. **Author Analysis Spec & Dispatch `analyze`**:
    * Write `/tmp/codex-orchestrator/<task-id>/spec-analyze.md` using the `analyze` section of `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/research-spec-template.md`.
