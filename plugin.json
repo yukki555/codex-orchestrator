@@ -1,12 +1,15 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator (agy CLI)",
-  "description": "Manager/Implementer Dual-Brain plugin for Antigravity CLI (agy) & App: Gemini plans, enforces DAG parallelism, writes Specs, orchestrates Codex CLI (or codex-worker), runs layered verification, and ships /impl, /review, and /dag slash skills with clear Chinese briefs.",
-  "version": "2.1.0",
+  "description": "General-purpose Dual-Brain orchestration plugin for Antigravity CLI (agy) & App: Gemini plans, freezes research/data corpora, orchestrates Codex CLI (or codex-worker) across coding (/impl, /review, /dag) and research/red-team/analysis (/research, /debate, /analyze) with strict JSON schemas, layered verification, and clear Chinese briefs.",
+  "version": "3.0.0",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
     "/impl Explore the codebase, write a Spec, delegate implementation to Codex CLI, verify, and brief me clearly",
     "/review Run a single-pass structured Codex CLI review on uncommitted changes and explain key risks in Chinese",
-    "/dag Lock a shared contract, run parallel managed-worktree Codex workers, check merge conflicts, and brief me"
+    "/dag Lock a shared contract, run parallel managed-worktree Codex workers, check merge conflicts, and brief me",
+    "/research Freeze a source corpus, run parallel Codex research + blind critique, spot-check citations, and brief me",
+    "/debate Run a blind red-team Codex critique on this proposal, adjudicate P0/P1 challenges, and give a decision matrix",
+    "/analyze Cross-check paper/theory, code, and experiment metrics with Codex analyze mode and highlight discrepancies"
   ]
 }

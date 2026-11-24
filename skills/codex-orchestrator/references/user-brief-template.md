@@ -1,6 +1,10 @@
-# Human-Readable Review Brief Template (Gemini Manager -> User)
+# Human-Readable Brief Templates (Gemini Manager -> User, v3.0)
 
-Use this structure whenever presenting Codex `implement`, `consult`, or `review` results to the user. **Never paste Codex's raw text or JSON directly.**
+Use the matching template whenever presenting Codex results to the user. **Never paste Codex's raw text or JSON directly.**
+
+---
+
+## Template A: Engineering Implementation / Code Review (`/impl`, `/dag`, `/review`)
 
 ```markdown
 ### 一、结论（TL;DR）
@@ -27,8 +31,38 @@ Use this structure whenever presenting Codex `implement`, `consult`, or `review`
 - <如有取舍、未覆盖场景或阻塞项，给出 1–3 个清晰选项请用户拍板；若无，明确写“当前无阻塞风险”。>
 ```
 
+---
+
+## Template B: Research / Red-Team Debate / Experiment Analysis (`/research`, `/debate`, `/analyze`)
+
+```markdown
+### 一、一句话结论与推荐（TL;DR）
+<!-- 直接给出调研结论、辩论裁定或一致性核查结果，并标明当前结论的置信度。 -->
+
+### 二、核心对比矩阵 / 关键发现
+<!-- 按决策维度整理 Markdown 对比表（或“论文/预期 vs 源码实现 vs 实验观测”三方核对表）；
+     复杂方案权衡或因果链路配精简 Mermaid 图。 -->
+
+| 维度 | 方案 A / 预期 | 方案 B / 实测 | 关键出处 |
+| :--- | :--- | :--- | :--- |
+| <维度 1> | <结论> | <结论> | <`source_id` / `file:line` / URL> |
+
+### 三、反方质疑、边界条件与分歧点
+<!-- 专门列出红队 `critique` 提出的 P0/P1 挑战、反例与适用前提；说明哪些质疑经核查成立、哪些不成立。 -->
+
+### 四、独立溯源抽查与事实边界
+- **语料与分工**：<说明采集了哪些来源存入 `corpus/`、并发运行了哪些 Codex / Gemini 路径及是否开启 `--web-search` / `--image`>
+- **溯源抽查（Gemini 核验）**：已直接回查 `<2–3 条核心结论对应的原文段落、数据行号或 URL>`，确认无断章取义或幻觉引用。
+- **已核实事实 vs 推断 / 知识缺口**：明确标出仍缺实证支撑的环节（`knowledge_gaps`）。
+
+### 五、下一步建议与待拍板选项
+- <给出 1–3 个可立即执行的选项或验证实验，供用户拍板。>
+```
+
+---
+
 ## 表达红线
 1. 严禁直接复制粘贴、翻译腔照搬 Codex 的 `last_message.md`。
 2. 不要按时间流水账汇报（禁止“先读了 A、再 grep 了 B、然后改了 C”）。
 3. 禁止把一串未解释的代码符号/变量名当句子主语。
-4. 仅陈述实际核验过的文件、改动、命令与结果；未实跑或未抽查的事项必须明确标出。
+4. 仅陈述实际核验过的文件、来源、指标、命令与结果；未实跑或未溯源抽查的事项必须明确标出。

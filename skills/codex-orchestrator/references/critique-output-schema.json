@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodexOrchestratorCritiqueEvidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "strengths",
+    "challenges",
+    "missing_alternatives",
+    "unverified_assumptions",
+    "decision_matrix"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "sound",
+        "needs_revision",
+        "flawed",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "strengths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "challenges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "target_claim",
+          "flaw_type",
+          "counter_argument",
+          "evidence_or_location",
+          "suggested_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "target_claim": {
+            "type": "string"
+          },
+          "flaw_type": {
+            "type": "string"
+          },
+          "counter_argument": {
+            "type": "string"
+          },
+          "evidence_or_location": {
+            "type": "string"
+          },
+          "suggested_fix": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "missing_alternatives": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unverified_assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision_matrix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "option",
+          "pros",
+          "cons",
+          "risk_level"
+        ],
+        "properties": {
+          "option": {
+            "type": "string"
+          },
+          "pros": {
+            "type": "string"
+          },
+          "cons": {
+            "type": "string"
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -18,8 +18,8 @@ Execute strictly in order:
    * Run directly via `run_command`:
      `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh --out-dir /tmp/codex-orchestrator/<task-id>/stage1 --mode implement --structured --max-parallel 3 --dir "<repo>" --timeout 240 --manifest /tmp/codex-orchestrator/<task-id>/manifest.json`
 4. **Merge Preflight & Stage 2 Integration**:
-   * Inspect `parallel-summary.json` (`merge_ok`, `merge_check`, per-task `changed_files` & `patch_file`).
-   * If `merge_ok` is `true`, apply the clean `changes.patch` files (`git apply`), then run the Stage 2 integration worker on glue files. If `merge_ok` is `false`, resolve `overlapping_files` before merging.
+   * Inspect `parallel-summary.json` (`status`, `merge_ok`, `merge_check`, per-task `status`/`changed_files`/`patch_file`).
+   * Only when top-level `status == "ok"` (every Stage 1 worker succeeded) **and** `merge_ok` is `true`, apply the clean `changes.patch` files (`git apply`) and run the Stage 2 integration worker on glue files. If any worker failed/timed out or `merge_ok` is `false`, repair failed tasks or resolve `overlapping_files` before applying any patch.
 5. **Stage 3 — Parallel Verification & Diff Review**:
    * Once local/CPU unit checks pass, run remote GPU/E2E tests (executed by `agy` / `codex-worker`, never inside Codex) concurrently with local `run_codex.sh review --uncommitted --structured`.
 6. **Chinese Executive Brief**:
