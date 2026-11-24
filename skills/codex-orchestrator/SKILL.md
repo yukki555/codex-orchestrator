@@ -42,26 +42,26 @@ Speed tier (`--speed <default|fast|ultrafast|inherit>`) is **orthogonal** to mod
 
 | Mode | Default Model / Effort | Default Speed | Default `--max-cmds` | Sandbox & `--structured` Schema |
 | :--- | :--- | :--- | :--- | :--- |
-| `implement` | `gpt-6.2-sol` / `medium` | `fast` | `12` (`0` disables) | `-s workspace-write` -> [codex-output-schema.json](./references/codex-output-schema.json) |
+| `implement` | `gpt-6.2-sol` / `medium` | `ultrafast` | `12` (`0` disables) | `-s workspace-write` -> [codex-output-schema.json](./references/codex-output-schema.json) |
 | `consult` | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `-s read-only` -> [codex-output-schema.json](./references/codex-output-schema.json) |
 | `review` (`--structured`/`--prompt`/`--spec`/`--image`/`--max-cmds > 0`) | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `read-only-exec` + bounded git snapshot -> [codex-output-schema.json](./references/codex-output-schema.json) |
 | `review` (bare target, `--max-cmds 0` or omitted w/o prompt/schema/image) | `gpt-6.2-astra` / `medium` | `fast` | `0` | Native `codex exec review` |
-| `resume` | Auto-inherited prior model / `medium` | `fast` | `8` (`0` disables) | `codex exec resume` (inherits prior `add_dirs` for `workspace-write`) |
+| `resume` | Auto-inherited prior model / `medium` | `ultrafast` (`sol`) / `fast` (`astra`) | `8` (`0` disables) | `codex exec resume` (inherits prior `add_dirs` for `workspace-write`) |
 | `research` | `gpt-6.2-astra` / `medium` | `fast` | `10` (`0` disables) | `-s read-only` -> [research-output-schema.json](./references/research-output-schema.json) |
 | `critique` | `gpt-6.2-astra` / `medium` | `fast` | `8` (`0` disables) | `-s read-only` -> [critique-output-schema.json](./references/critique-output-schema.json) |
 | `analyze` | `gpt-6.2-astra` / `medium` | `fast` | `10` (`0` disables) | `-s read-only` -> [analysis-output-schema.json](./references/analysis-output-schema.json) |
-| `--fast` preset | Sets unset options to `gpt-6.2-sol` / `low` / `fast` | `fast` | Mode default | Never clobbers explicit `--model`/`--effort`/`--speed` |
+| `--fast` preset | Sets unset options to `gpt-6.2-sol` / `low` / `ultrafast` | `ultrafast` (`sol`) / `fast` (`other`) | Mode default | Never clobbers explicit `--model`/`--effort`/`--speed` |
 
 * **Multimodal & Live Search Flags**:
   * `--image <FILE>` (repeatable): Attaches PNG/JPG charts, diagrams, or screenshots (`-i <FILE>`) to `consult`, `implement`, `research`, `critique`, `analyze`, `resume`, or `review` (auto-routes `review` via `read-only-exec`). Supported in `run_codex_parallel.sh` via `--image` or per-task manifest `"images": [...]`.
   * `--web-search`: Opt-in flag (default **OFF** with explicit `-c web_search="disabled"` to keep runs reproducible on local/frozen corpora). When enabled, invokes `codex --search exec ...` so Codex can call the native Responses `web_search` tool. Supported in `run_codex_parallel.sh` via `--web-search` or per-task manifest `"web_search": true`.
-* **Speed Defaults**: Effective effort `low` or `medium` automatically uses `service_tier="fast"` (`2x` speed). `high`, `xhigh`, `max`, `ultra` default to `default` (add `--speed fast` explicitly when speed matters; `--speed default` forces standard tier on `low`/`medium`). `ultrafast` works on `gpt-6.2-sol` and auto-downgrades to `fast` with a warning on `gpt-6.2-astra`.
+* **Speed Defaults**: Effective effort `low` or `medium` (and `--fast`) automatically uses `service_tier="ultrafast"` on `gpt-6.2-sol` and `service_tier="fast"` on `gpt-6.2-astra`/other models. `high`, `xhigh`, `max`, `ultra` default to `default` (pass `--speed ultrafast` explicitly on `gpt-6.2-sol` or `--speed fast` on either model when speed matters; `--speed default` forces standard tier on `low`/`medium`). `ultrafast` on `gpt-6.2-astra` auto-downgrades to `fast` with a warning.
 * **Rules & Config Isolation**: Both `--ignore-user-config` and `--ignore-rules` default to **enabled** (preserving `~/.codex` login while skipping `~/.codex/config.toml` and `~/.codex/rules`); `--use-user-config` / `--use-rules` automatically fall back and retry if blocked.
 * **`--structured` & Telemetry**: Enforces and recursively validates the mode's bundled strict JSON Schema (or custom `--schema <FILE>`, including per-task `schema` in parallel manifests), records `structured_valid`, `web_search`, `images`, `schema_file`, and `modified_files` in `summary.json` (printing `structured`, `web_search`, `structured_valid`, and `partial_progress` to stdout).
 
 ## Context Hygiene & Anti-Bloat Rules
 
-* **Anti-Bloat `resume` Threshold**: Reserve `resume` for immediate short loops (`< 1,000,000` prior `tokens.input`, non-timeout). When applying post-review `file:line` fixes or recovering from a huge/timed-out run, spawn a **fresh `implement --effort medium --speed fast`** run instead of resuming multi-million-token history.
+* **Anti-Bloat `resume` Threshold**: Reserve `resume` for immediate short loops (`< 1,000,000` prior `tokens.input`, non-timeout). When applying post-review `file:line` fixes or recovering from a huge/timed-out run, spawn a **fresh `implement --effort medium --speed ultrafast`** run instead of resuming multi-million-token history.
 * **Environment & Corpus Facts in Spec**: State local runtime limitations and corpus index paths explicitly so Codex skips wasted discovery commands.
 
 ## Layered Verification & Human-Readable Brief ("说人话" Gate)
@@ -81,7 +81,7 @@ Before replying to the user after any Codex run:
 ```bash
 SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
 
-# 1. Default medium+fast structured implementation
+# 1. Default medium+ultrafast structured implementation (gpt-6.2-sol)
 "$SCRIPTS/run_codex.sh" implement \
   --dir "/path/to/repo" --add-dir "/path/to/tests" \
   --structured --timeout 240 \

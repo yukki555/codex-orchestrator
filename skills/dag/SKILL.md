@@ -13,7 +13,7 @@ Execute strictly in order:
    * Inspect only the relevant entry files via `read_file` and split implementation into `2–3` disjoint modules (no shared files across Stage 1 workers) plus `1` Stage 2 integration task if glue files (`train.py`, CLI entrypoints) exist.
 2. **Stage 0 — Lock Shared Contract & Manifest**:
    * Write `/tmp/codex-orchestrator/<task-id>/contract.md` locking cross-module signatures, schema/dict keys, CLI flags, checkpoint formats, and isolated remote test directories.
-   * Write focused `spec-<mod>.md` files (~3–4 KB each) referencing `contract.md`, plus `/tmp/codex-orchestrator/<task-id>/manifest.json` (use default `medium` + `fast` tier for routine modules; escalate to `effort: "high"` only for core algorithmic modules).
+   * Write focused `spec-<mod>.md` files (~3–4 KB each) referencing `contract.md`, plus `/tmp/codex-orchestrator/<task-id>/manifest.json` (use default `medium` + `ultrafast` tier on `gpt-6.2-sol` for routine modules; escalate to `effort: "high"` only for core algorithmic modules).
 3. **Stage 1 — Parallel Managed Worktree Execution**:
    * Run via `run_command` (or `codex-worker`):
      `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh --out-dir /tmp/codex-orchestrator/<task-id>/stage1 --mode implement --structured --max-parallel 3 --dir "<repo>" --timeout 240 --manifest /tmp/codex-orchestrator/<task-id>/manifest.json`

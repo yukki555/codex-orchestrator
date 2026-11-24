@@ -439,6 +439,35 @@ class CodexWrapperTests(unittest.TestCase):
             ['web_search="disabled"', 'web_search="live"'],
         )
 
+    def test_run_codex_sol_defaults_to_ultrafast_and_astra_stays_fast(self):
+        for name, args, model, effort, speed in (
+            ("sol-medium", ("implement",), "gpt-6.2-sol", "medium", "ultrafast"),
+            ("sol-fast-preset", ("implement", "--fast"), "gpt-6.2-sol", "low", "ultrafast"),
+            ("sol-high", ("implement", "--effort", "high"), "gpt-6.2-sol", "high", "default"),
+            ("sol-high-override", ("implement", "--effort", "high", "--speed", "ultrafast"),
+             "gpt-6.2-sol", "high", "ultrafast"),
+            ("sol-fast-override", ("implement", "--speed", "fast"), "gpt-6.2-sol", "medium", "fast"),
+            ("astra-medium", ("consult",), "gpt-6.2-astra", "medium", "fast"),
+            ("astra-downgrade", ("consult", "--speed", "ultrafast"), "gpt-6.2-astra", "medium", "fast"),
+        ):
+            with self.subTest(name=name):
+                self.out = self.temp / name
+                result = self._run_wrapper(
+                    "run_codex.sh", *args, "--dir", self.corpus, "--prompt", "Inspect the corpus.",
+                )
+                argv = self._read_json(self.out / "codex-argv.json")
+                tiers = [value for flag, value in zip(argv, argv[1:])
+                         if flag == "-c" and value.startswith("service_tier=")]
+                self.assertEqual(tiers, [] if speed == "default" else [f'service_tier="{speed}"'])
+
+                summary = self._read_json(self.out / "summary.json")
+                self.assertEqual(summary["model"], model)
+                self.assertEqual(summary["effort"], effort)
+                self.assertEqual(summary["speed"], speed)
+                self.assertIs(summary["fast"], speed in ("fast", "ultrafast"))
+                if name == "astra-downgrade":
+                    self.assertIn("gpt-6.2-astra does not support ultrafast", result.stderr)
+
     def test_run_codex_structured_validates_last_message(self):
         complete = {
             "verdict": "completed",

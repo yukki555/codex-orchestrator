@@ -29,7 +29,7 @@ flowchart LR
   * **Recursive Schema Validation**: `structured_valid` validates `last_message.md` recursively against the active JSON Schema (`type`, `required`, `properties`, `additionalProperties`, `items`, `enum`) instead of merely checking JSON syntax.
 * **Offline Reproducible Corpora + Opt-In Live Web Search (`--web-search`)**: Defaults to offline execution with explicit `-c web_search="disabled"` so frozen-corpus audits remain reproducible; pass `--web-search` (or per-task `"web_search": true` in parallel manifests) to invoke `codex --search exec` for live web lookup.
 * **Multimodal Image Attachments (`-i` / `--image <FILE>`)**: Repeatable chart, figure, or screenshot attachment across `consult`, `implement`, `research`, `critique`, `analyze`, `resume`, and `review` (auto-routes `review` via `read-only-exec`), plus per-task `"images": [...]` in parallel manifests.
-* **Decoupled Speed & Reasoning Routing (`--speed`)**: Automatically enables `service_tier="fast"` (`2x` speed) for `low`/`medium` effort across both `gpt-6.2-sol` and `gpt-6.2-astra`, while keeping `high`+ at `default` unless `--speed fast` is passed (`ultrafast` supported on `gpt-6.2-sol`, auto-downgrades safely on `gpt-6.2-astra`).
+* **Decoupled Speed & Reasoning Routing (`--speed`)**: Automatically enables `service_tier="ultrafast"` on `gpt-6.2-sol` and `service_tier="fast"` on `gpt-6.2-astra` for `low`/`medium` effort (and `--fast`), while keeping `high`+ at `default` unless `--speed ultrafast` (`sol`) or `--speed fast` is passed (`ultrafast` auto-downgrades safely to `fast` on `gpt-6.2-astra`).
 * **Zero-Intrusion Desktop Config Isolation & Telemetry**: Defaults to `--ignore-user-config` and `--ignore-rules` (reusing `~/.codex` auth while avoiding macOS sandbox permission errors and noisy Desktop MCP configs), auto-inherits `model`/`add_dirs` on `resume`, and extracts `partial_progress` on failures/timeouts.
 
 ## Prerequisites & Installation
@@ -66,7 +66,7 @@ In normal Antigravity sessions, describe your engineering or research task in na
 ```bash
 SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
 
-# 1. Default medium+fast structured implementation
+# 1. Default medium+ultrafast structured implementation (gpt-6.2-sol)
 "$SCRIPTS/run_codex.sh" implement \
   --dir "/path/to/repo" --add-dir "/path/to/tests" \
   --structured --timeout 240 \

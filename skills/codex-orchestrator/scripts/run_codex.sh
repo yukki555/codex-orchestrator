@@ -23,8 +23,9 @@ Common options:
   --effort <LEVEL>       Reasoning effort: low|medium|high|xhigh|max|ultra|inherit
   --fast                 Preset for unset model/effort: gpt-6.2-sol / low
   --speed <TIER>        default|fast|ultrafast|inherit
-                        When omitted: inherit with --profile, fast with --fast or
-                        low/medium effort, default otherwise. Astra downgrades ultrafast to fast.
+                        When omitted, inherit with --profile. With --fast or low/medium
+                        effort, use ultrafast on gpt-6.2-sol and fast on other models.
+                        Use default otherwise. Astra downgrades ultrafast to fast.
   --no-mcp               Disable external MCP servers via -c 'mcp_servers={}' (default: enabled)
   --with-mcp             Allow external MCP servers from ~/.codex/config.toml
   --profile <NAME>       Codex config profile (-p); omitted model/effort default to inherit
@@ -685,7 +686,11 @@ if [[ "$SPEED_EXPLICIT" == true ]]; then
 elif [[ -n "$PROFILE" ]]; then
   EFFECTIVE_SPEED="inherit"
 elif [[ "$FAST_MODE" == true || "$EFFECTIVE_EFFORT" == "low" || "$EFFECTIVE_EFFORT" == "medium" ]]; then
-  EFFECTIVE_SPEED="fast"
+  if [[ "$EFFECTIVE_MODEL" == "gpt-6.2-sol" ]]; then
+    EFFECTIVE_SPEED="ultrafast"
+  else
+    EFFECTIVE_SPEED="fast"
+  fi
 else
   EFFECTIVE_SPEED="default"
 fi
