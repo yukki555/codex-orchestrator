@@ -79,7 +79,7 @@ class AntigravityPluginTests(unittest.TestCase):
         plugin = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
-        self.assertEqual(plugin["version"], "3.0.0")
+        self.assertEqual(plugin["version"], "3.1.0")
 
         hooks = json.loads((ROOT / "hooks.json").read_text(encoding="utf-8"))
         pre_tool_use = hooks["codex-delegate-guard"]["PreToolUse"]
@@ -174,6 +174,38 @@ class AntigravityPluginTests(unittest.TestCase):
                 content = path.read_text(encoding="utf-8")
                 for marker in ("{{args}}", "!{", "~/.gemini/extensions/"):
                     self.assertNotIn(marker, content, f"{path} contains {marker!r}")
+
+    def test_v31_communication_charter_consistency(self):
+        charter = REFERENCES / "user-brief-template.md"
+        required_markers = {
+            charter: (
+                "沟通宪章 v3.1",
+                "表达与保真五条铁律",
+                "按任务量级动态路由",
+                "consult",
+                "轻量代码改动",
+                "重量级工程交付",
+                "深度调研 / 红队辩论 / 实验核查",
+            ),
+            RULES: ("Communication Charter", "Dynamic Structure Routing", charter.name),
+            ROOT / "README.md": ("v3.1.0", "Communication Charter", charter.name),
+            SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.1", charter.name),
+            SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.1", "lightweight route", charter.name),
+            SKILLS / "review" / "SKILL.md": ("Communication Charter v3.1", "review", charter.name),
+            SKILLS / "dag" / "SKILL.md": ("Communication Charter v3.1", "heavyweight", charter.name),
+            SKILLS / "research" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
+            SKILLS / "debate" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
+            SKILLS / "analyze" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
+        }
+        paths = list(required_markers)
+        for path in paths:
+            content = path.read_text(encoding="utf-8")
+            for marker in required_markers.get(path, ()):
+                with self.subTest(path=path.relative_to(ROOT), required=marker):
+                    self.assertIn(marker, content)
+            for marker in ("Template A", "Template B"):
+                with self.subTest(path=path.relative_to(ROOT), stale=marker):
+                    self.assertNotIn(marker, content)
 
     def test_scripts_syntax_and_no_personal_paths(self):
         for script in ("run_codex.sh", "run_codex_parallel.sh"):

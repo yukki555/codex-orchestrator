@@ -1,8 +1,8 @@
-# Codex Orchestrator — Antigravity CLI (`agy`) Edition (`gemini-cli` branch, `v3.0.0`)
+# Codex Orchestrator — Antigravity CLI (`agy`) Edition (`gemini-cli` branch, `v3.1.0`)
 
 A native **Antigravity CLI (`agy`)** & App plugin implementing a **General-Purpose Dual-Brain Orchestration** workflow: **Gemini in `agy`** acts as **Principal Manager, Corpus Collector & Decision-Maker**, while **local OpenAI Codex CLI** acts as **High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst** across both **coding** (`/impl`, `/review`, `/dag`) and **research / debate / experiment analysis** (`/research`, `/debate`, `/analyze`).
 
-> Looking for the Antigravity Desktop **`main`** branch? See [`main`](https://github.com/yukki555/codex-orchestrator/tree/main). This **`gemini-cli` (`agy` Edition)** branch keeps full backward compatibility with all `v2.1.0` coding workflows and upgrades to **`v3.0.0`** with pluggable non-code profiles (`research`, `critique`, `analyze`), 3 new strict JSON schemas, recursive schema validation, `--image` multimodal attachment, opt-in `--web-search`, and `/research`, `/debate`, `/analyze` slash skills.
+> Looking for the Antigravity Desktop **`main`** branch? See [`main`](https://github.com/yukki555/codex-orchestrator/tree/main). This **`gemini-cli` (`agy` Edition)** branch keeps full backward compatibility with all `v2.1.0`/`v3.0` workflows and upgrades to **`v3.1.0`** with the **Dynamic Communication Charter (`v3.1`)** (replacing rigid fixed 5-section templates with task-weight dynamic routing and strict factual-precision guardrails), alongside pluggable non-code profiles (`research`, `critique`, `analyze`), 4 strict JSON schemas, recursive schema validation, `--image` multimodal attachment, opt-in `--web-search`, and `/research`, `/debate`, `/analyze` slash skills.
 
 ## Architecture Overview
 
@@ -36,7 +36,7 @@ flowchart LR
 4. Verify discovery:
    ```bash
    agy plugin list
-   # Expected: codex-orchestrator (enabled, 3.0.0) — 7 skills, 1 agent, 1 rule, 1 hook
+   # Expected: codex-orchestrator (enabled, 3.1.0) — 7 skills, 1 agent, 1 rule, 1 hook
    ```
 
 ## Recommended `agy` CLI Settings (Turbo / Auto)
@@ -121,12 +121,12 @@ python3 -m unittest discover -s ~/.gemini/config/plugins/codex-orchestrator/test
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json` | Antigravity plugin manifest (`v3.0.0`) |
+| `plugin.json` | Antigravity plugin manifest (`v3.1.0`) |
 | `hooks.json` | Root `PreToolUse` hook registration (`codex-delegate-guard`, code writes only) |
-| `rules/AGENTS.md` | Always-on Dual-Brain delegation, tiered research routing, DAG gate, and Chinese synthesis policy |
+| `rules/AGENTS.md` | Always-on Dual-Brain delegation, tiered research routing, DAG gate, and Communication Charter (`v3.1`) |
 | `agents/codex-worker.md` | Dedicated Codex execution & verification subagent |
-| `skills/codex-orchestrator/SKILL.md` | Full orchestration handbook (`v3.0`) |
+| `skills/codex-orchestrator/SKILL.md` | Full orchestration handbook (`v3.1`) |
 | `skills/{impl,review,dag,research,debate,analyze}/SKILL.md` | Bundled slash skills covering code & general research/debate/analysis workflows |
 | `skills/codex-orchestrator/scripts/` | `run_codex.sh`, `run_codex_parallel.sh`, and `hook_delegate_guard.py` |
-| `skills/codex-orchestrator/references/` | 4 strict JSON schemas (`codex`, `research`, `critique`, `analysis`), Spec templates, and Template A/B brief templates |
+| `skills/codex-orchestrator/references/` | 4 strict JSON schemas (`codex`, `research`, `critique`, `analysis`), Spec templates, and the `v3.1` Communication Charter (`user-brief-template.md`) |
 | `tests/test_agy_plugin.py` | Unit tests covering manifests, `hooks.json`, `agents`, 7 skills, 4 schemas, stub-Codex CLI/parallel routing, and hook guard |

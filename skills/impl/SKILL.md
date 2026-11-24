@@ -20,4 +20,4 @@ Execute strictly in order:
    * Inspect `git status` / `git diff --stat` (and `summary.json["partial_progress"]` if `status != ok`).
    * Run verification tests (without redundantly repeating identical unit tests already verified by `codex-worker`).
 5. **Chinese Executive Brief**:
-   * Rewrite findings from scratch in clear natural Chinese following `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (never paste raw Codex prose).
+   * Rewrite findings from scratch in calm, precise natural Chinese following the **Communication Charter v3.1** in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (use the compact lightweight route for 1–2 file targeted changes, or the heavyweight engineering route for multi-module/cross-host deliveries; never paste raw Codex prose or internal metadata).
