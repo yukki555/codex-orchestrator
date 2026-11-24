@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# codex-orchestrator v3.0.0
+# codex-orchestrator v3.2.0
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 - "$SCRIPT_DIR/run_codex.sh" "$@" <<'PY'
+exec python3 -I -B - "$SCRIPT_DIR/run_codex.sh" "$@" <<'PY'
 import argparse
 import json
 import os
@@ -12,19 +12,27 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from codex_orch.schema_check import preflight_schema
+
 MODES = ("consult", "implement", "review", "research", "critique", "analyze")
 SPEEDS = ("default", "fast", "ultrafast", "inherit")
+STDOUT_MODES = ("auto", "compact", "full")
 OVERRIDES = {
     "model": "--model",
     "effort": "--effort",
     "speed": "--speed",
     "timeout": "--timeout",
+    "stall_timeout": "--stall-timeout",
+    "stdout_mode": "--stdout-mode",
     "max_cmds": "--max-cmds",
 }
 BOOLEAN_FLAGS = ("fast", "ephemeral", "structured", "ignore_rules", "use_rules",
@@ -37,7 +45,9 @@ MANIFEST_HELP = """Manifest schema
   mode          consult, implement, review, research, critique or analyze.
   model, effort, speed
                 String overrides for the corresponding worker flags.
-  timeout       Positive integer seconds.
+  timeout, stall_timeout
+                Positive integer seconds.
+  stdout_mode   auto, compact or full.
   max_cmds      Non-negative integer. Zero disables the worker command budget.
   add_dirs      Array of directory paths appended to CLI --add-dir values.
   images        Array of image paths appended to CLI --image values.
@@ -85,7 +95,7 @@ def argument_path(validate):
 def usage():
     parser = argparse.ArgumentParser(
         prog="run_codex_parallel.sh",
-        description="Run parallel Codex workers with v3.0.0 isolation and patch preflight.",
+        description="Run parallel Codex workers with v3.2.0 isolation and patch verification.",
         epilog=MANIFEST_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
@@ -108,6 +118,10 @@ def usage():
                         metavar="FILE", help="attach an image to each worker prompt (repeatable)")
     parser.add_argument("--timeout", type=lambda value: integer(value, positive=True),
                         metavar="SECONDS", help="worker timeout in seconds")
+    parser.add_argument("--stall-timeout", type=lambda value: integer(value, positive=True),
+                        metavar="SECONDS", help="worker inactivity timeout in seconds")
+    parser.add_argument("--stdout-mode", choices=STDOUT_MODES, default="auto",
+                        help="worker output preview mode (default: auto)")
     parser.add_argument("--max-cmds", type=integer, metavar="N",
                         help="worker command budget (0 disables it)")
     parser.add_argument("-c", "--config", action="append", default=[], metavar="K=V",
@@ -136,6 +150,8 @@ def usage():
                                 "managed worktrees in Git repositories with a valid HEAD)")
     parser.add_argument("--keep-worktrees", action="store_true",
                         help="preserve successful worktrees as well as failed worktrees")
+    parser.add_argument("--dirty-policy", choices=("fail", "head"), default="fail",
+                        help="refuse dirty checkouts or explicitly use clean HEAD for managed worktrees")
     tasks = parser.add_mutually_exclusive_group(required=True)
     tasks.add_argument("--task", action="append", metavar="NAME:SPEC[:DIR]",
                        help="define a task (repeatable, empty SPEC allowed in review)")
@@ -244,7 +260,9 @@ def prepare_tasks(options, out_dir):
                     raise ValueError(f"{key} must be a string")
             if overrides["speed"] is not None and overrides["speed"] not in SPEEDS:
                 raise ValueError("speed must be default, fast, ultrafast, or inherit")
-            for key, minimum in (("timeout", 1), ("max_cmds", 0)):
+            if overrides["stdout_mode"] not in STDOUT_MODES:
+                raise ValueError("stdout_mode must be auto, compact, or full")
+            for key, minimum in (("timeout", 1), ("stall_timeout", 1), ("max_cmds", 0)):
                 if key in entry and (type(entry[key]) is not int or entry[key] < minimum):
                     raise ValueError(f"{key} must be an integer >= {minimum}")
             flags = {key: getattr(options, key) for key in BOOLEAN_FLAGS}
@@ -257,6 +275,10 @@ def prepare_tasks(options, out_dir):
                            if "schema" in entry else options.schema)
             if flags["structured"] and task_schema is not None:
                 raise ValueError("--structured and --schema are mutually exclusive")
+            if task_schema is not None:
+                _, schema_error = preflight_schema(task_schema)
+                if schema_error:
+                    raise ValueError(schema_error)
             images = options.image + [
                 manifest_path(path, parent, readable_file) for path in value_list(entry, "images")
             ]
@@ -277,10 +299,15 @@ def prepare_tasks(options, out_dir):
             else:
                 isolation = "managed-worktree"
             if root is not None and root not in repos:
-                dirty = bool(git(root, "status", "--porcelain").stdout)
+                base_oid = git(root, "rev-parse", "--verify", "HEAD").stdout.decode("ascii").strip()
+                dirty = bool(git(root, "status", "--porcelain", "--untracked-files=normal").stdout)
                 common_dir = (root / git_path(git(root, "rev-parse", "--git-common-dir").stdout)).resolve()
-                repos[root] = (dirty, locks.setdefault(common_dir, Lock()))
-            dirty, lock = repos.get(root, (False, None))
+                repos[root] = (base_oid, dirty, common_dir, locks.setdefault(common_dir, Lock()))
+            base_oid, dirty, common_dir, lock = repos.get(root, (None, False, None, None))
+            if isolation == "managed-worktree" and dirty and options.dirty_policy == "fail":
+                raise ValueError(f"Git checkout has uncommitted changes at {root}. "
+                                 "Commit, stash, or remove local changes, or explicitly pass "
+                                 "--dirty-policy head to start from clean HEAD.")
         except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             raise ValueError(f"task {name!r}: {error_text(exc)}") from exc
 
@@ -288,27 +315,28 @@ def prepare_tasks(options, out_dir):
             "name": name, "mode": mode, "spec": spec, "dir": target, "out_dir": out_dir / name,
             "overrides": overrides, "flags": flags, "add_dirs": add_dirs, "configs": configs,
             "images": images, "schema": task_schema,
-            "isolation": isolation, "git_root": root, "lock": lock,
-            "base_dirty_warning": dirty, "worktree": None, "setup_error": "",
+            "isolation": isolation, "git_root": root, "git_common_dir": common_dir, "lock": lock,
+            "base_oid": base_oid, "base_dirty_warning": dirty, "worktree": None,
+            "worktree_registered": False, "setup_error": "",
+            "external_add_dirs": [str(path) for path in add_dirs
+                                  if isolation != "managed-worktree" or not path.is_relative_to(root)],
         })
     return tasks
 
 
-def add_worktree(root, path, lock):
+def add_worktree(root, path, base_oid, lock):
     with lock:
         if path.exists() or path.is_symlink():
             raise ValueError(f"worktree path already exists: {path}")
-        git(root, "worktree", "add", "--detach", str(path), "HEAD")
+        git(root, "worktree", "add", "--detach", str(path), base_oid)
 
 
-def remove_worktree(root, path, lock):
+def remove_worktree(root, path, lock, *, registered=True):
+    if not registered:
+        return
     with lock:
-        try:
-            git(root, "worktree", "remove", "--force", str(path))
-        except subprocess.CalledProcessError:
-            if path.exists():
-                shutil.rmtree(path)
-            git(root, "worktree", "prune")
+        git(root, "worktree", "remove", "--force", str(path))
+        git(root, "worktree", "prune")
 
 
 def translate(path, root, worktree):
@@ -318,7 +346,7 @@ def translate(path, root, worktree):
         return path
     mapped = worktree / relative
     try:
-        mapped.resolve().relative_to(worktree)
+        mapped.resolve().relative_to(worktree.resolve())
     except ValueError as exc:
         raise ValueError(f"directory resolves outside the worktree: {mapped}") from exc
     # A directory in the original checkout may contain only untracked files.
@@ -326,14 +354,15 @@ def translate(path, root, worktree):
     return mapped
 
 
-def worker_command(run_codex, task, schema):
+def worker_command(run_codex, task, invocation_id):
     target = task["dir"]
     add_dirs = task["add_dirs"]
     if task["worktree"] is not None:
         root, worktree = task["git_root"], task["worktree"]
         target = translate(target, root, worktree)
         add_dirs = [translate(path, root, worktree) for path in add_dirs]
-    cmd = [run_codex, task["mode"], "--dir", str(target), "--out-dir", str(task["out_dir"])]
+    cmd = [run_codex, task["mode"], "--dir", str(target), "--out-dir", str(task["out_dir"]),
+           "--invocation-id", invocation_id]
     if task["spec"] is not None:
         cmd.extend(["--spec", str(task["spec"])])
     for key, flag in OVERRIDES.items():
@@ -341,8 +370,8 @@ def worker_command(run_codex, task, schema):
         if value is not None:
             cmd.extend([flag, str(value)])
     cmd.extend("--" + key.replace("_", "-") for key, enabled in task["flags"].items() if enabled)
-    if schema:
-        cmd.extend(["--schema", str(schema)])
+    if task["schema"] is not None:
+        cmd.extend(["--schema", str(task["schema"])])
     for path in task["images"]:
         cmd.extend(["--image", str(path)])
     for path in add_dirs:
@@ -352,18 +381,15 @@ def worker_command(run_codex, task, schema):
     return cmd
 
 
-def changed_paths(worktree):
-    # Porcelain -z emits literal paths and puts the destination first for renames/copies.
-    records = iter(git(worktree, "status", "--porcelain", "-z", "--untracked-files=all")
-                   .stdout.split(b"\0"))
-    paths = set()
-    for record in records:
-        if not record:
-            continue
-        paths.add(os.fsdecode(record[3:]))
-        if b"R" in record[:2] or b"C" in record[:2]:
-            next(records, None)
-    return sorted(paths)
+def atomic_write(path, content):
+    temp = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False)
+    temp_path = Path(temp.name)
+    try:
+        with temp:
+            temp.write(content)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def fingerprint(path):
@@ -374,6 +400,22 @@ def fingerprint(path):
     return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def read_worker_summary(path, previous, invocation_id):
+    if not path.is_file():
+        raise ValueError("worker summary.json is missing or is not a file")
+    if fingerprint(path) == previous:
+        raise ValueError("worker summary.json was not refreshed")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ValueError(f"invalid worker summary.json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("worker summary.json must be a JSON object")
+    if data.get("invocation_id") != invocation_id:
+        raise ValueError("worker summary.json invocation_id does not match this invocation")
+    return data
+
+
 def run_one(task, run_codex, options):
     task_out = task["out_dir"]
     start = time.monotonic()
@@ -381,6 +423,7 @@ def run_one(task, run_codex, options):
     errors = []
     data = {}
     worktree = task["worktree"]
+    invocation_id = uuid.uuid4().hex
     try:
         task_out.mkdir(parents=True, exist_ok=True)
         stdout_log = task_out / "wrapper.stdout.log"
@@ -390,14 +433,18 @@ def run_one(task, run_codex, options):
         with stdout_log.open("wb") as stdout, stderr_log.open("wb") as stderr:
             if task["setup_error"]:
                 raise ValueError(task["setup_error"])
-            cmd = worker_command(run_codex, task, task["schema"])
+            cmd = worker_command(run_codex, task, invocation_id)
             result = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
             returncode = result.returncode
-        if fingerprint(summary_file) != previous_summary and summary_file.is_file():
-            data = json.loads(summary_file.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-                raise ValueError("worker summary must be a JSON object")
+        data = read_worker_summary(summary_file, previous_summary, invocation_id)
+        if data.get("status") != "ok" or data.get("exit_code") != 0:
+            raise ValueError(f"worker summary.json reported status={data.get('status')!r}, "
+                             f"exit_code={data.get('exit_code')!r}")
+        if returncode != 0:
+            raise ValueError(f"worker exited with code {returncode} despite a successful summary.json")
+        requires_structured = task["flags"]["structured"] or task["schema"] is not None
+        if requires_structured and data.get("structured_valid") is not True:
+            raise ValueError("worker summary.json must report structured_valid=true for structured output")
     except (ValueError, OSError, RuntimeError) as exc:
         errors.append(error_text(exc))
 
@@ -405,20 +452,58 @@ def run_one(task, run_codex, options):
     changed_files = (data.get("modified_files") or []) if worktree is None else []
     patch_file = None
     patch_bytes = 0
-    if worktree is not None:
+    base_oid = task["base_oid"]
+    final_tree_oid = reconstructed_tree_oid = None
+    custody_verified = False
+    if task["worktree_registered"]:
         try:
-            git(worktree, "add", "-N", "--", ".")
-            changed_files = changed_paths(worktree)
-            patch = git(worktree, "diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--")
-            path = task_out / "changes.patch"
-            path.write_bytes(patch.stdout)
-            patch_bytes = os.path.getsize(path)
-            patch_file = str(path)
-            if returncode == 0 and not errors and not options.keep_worktrees:
-                remove_worktree(task["git_root"], worktree, task["lock"])
+            index_env = os.environ.copy()
+            index_env.pop("GIT_INDEX_FILE", None)
+            real_index = worktree / git_path(
+                git(worktree, "rev-parse", "--git-path", "index", env=index_env).stdout
+            )
+            if git(worktree, "ls-files", "-u", env=index_env).stdout:
+                raise ValueError("worker index contains unmerged entries")
+            with tempfile.TemporaryDirectory() as private_dir:
+                tmp = Path(private_dir)
+                final_index = tmp / "final.index"
+                env_final = {**index_env, "GIT_INDEX_FILE": str(final_index)}
+                try:
+                    shutil.copyfile(real_index, final_index)
+                    git(worktree, "add", "-A", "--", ".", env=env_final)
+                    staged_tree = git(worktree, "write-tree", env=env_final).stdout.decode("ascii").strip()
+                    final_index.unlink()
+                    git(worktree, "read-tree", staged_tree, env=env_final)
+                except FileNotFoundError:
+                    worker_head = git(worktree, "rev-parse", "--verify", "HEAD").stdout.decode("ascii").strip()
+                    git(worktree, "read-tree", worker_head, env=env_final)
+                git(worktree, "add", "-A", "--", ".", env=env_final)
+                final_tree_oid = git(worktree, "write-tree", env=env_final).stdout.decode("ascii").strip()
+                patch = git(worktree, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+                            base_oid, final_tree_oid, "--").stdout
+                names = git(worktree, "diff", "--name-only", "-z", base_oid, final_tree_oid, "--").stdout
+                changed_files = sorted(os.fsdecode(name) for name in names.split(b"\0") if name)
+                path = task_out / "changes.patch"
+                atomic_write(path, patch)
+                patch_file = str(path)
+                patch_bytes = len(patch)
+
+                env_verify = {**os.environ, "GIT_INDEX_FILE": str(tmp / "verify.index")}
+                git(worktree, "read-tree", base_oid, env=env_verify)
+                if patch_bytes > 0:
+                    git(worktree, "apply", "--cached", "--binary", patch_file, env=env_verify)
+                reconstructed_tree_oid = git(worktree, "write-tree", env=env_verify).stdout.decode("ascii").strip()
+                custody_verified = reconstructed_tree_oid == final_tree_oid
+                if not custody_verified:
+                    errors.append(f"patch custody mismatch: reconstructed tree {reconstructed_tree_oid} "
+                                  f"differs from final tree {final_tree_oid}")
+                    returncode = 1
+
+            if returncode == 0 and not errors and custody_verified and not options.keep_worktrees:
+                remove_worktree(task["git_root"], worktree, task["lock"], registered=True)
                 worktree = None
         except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-            errors.append(error_text(exc))
+            errors.append(f"Worktree patch custody or cleanup: {error_text(exc)}")
 
     if errors and returncode == 0:
         returncode = 1
@@ -426,6 +511,7 @@ def run_one(task, run_codex, options):
         "task": task["name"],
         "isolation": task["isolation"],
         "mode": task["mode"],
+        "invocation_id": invocation_id,
         "model": data.get("model", task["overrides"]["model"]),
         "effort": data.get("effort", task["overrides"]["effort"]),
         "speed": data.get("speed", task["overrides"]["speed"]),
@@ -440,6 +526,12 @@ def run_one(task, run_codex, options):
         "thread_id": data.get("thread_id", "unknown"),
         "last_message": data.get("last_message", str(task_out / "last_message.md")),
         "git_root": str(task["git_root"]) if task["git_root"] is not None else None,
+        "git_common_dir": str(task["git_common_dir"]) if task["git_common_dir"] is not None else None,
+        "base_oid": base_oid,
+        "final_tree_oid": final_tree_oid,
+        "reconstructed_tree_oid": reconstructed_tree_oid,
+        "custody_verified": custody_verified,
+        "external_add_dirs": task["external_add_dirs"],
         "changed_files": changed_files,
         "patch_file": patch_file,
         "patch_bytes": patch_bytes,
@@ -451,16 +543,40 @@ def run_one(task, run_codex, options):
     return data
 
 
+def check_base_reconstruction(root, base_oid, lock, patches, worktrees, errors):
+    created = False
+    try:
+        verify_parent = Path(tempfile.mkdtemp(prefix="merge_check_", dir=worktrees))
+        verify = verify_parent / "wt"
+        add_worktree(root, verify, base_oid, lock)
+        created = True
+        for patch in patches:
+            try:
+                git(verify, "apply", "--binary", patch)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                errors.append(f"Sequential apply failed for {patch}: {error_text(exc)}")
+                return False
+        return True
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        errors.append(f"Verify worktree setup: {error_text(exc)}")
+        return False
+    finally:
+        if created:
+            try:
+                remove_worktree(root, verify, lock, registered=True)
+                verify_parent.rmdir()
+            except (OSError, subprocess.CalledProcessError) as exc:
+                errors.append(f"Verify worktree cleanup: {error_text(exc)}")
+
+
 def check_merges(tasks, results, worktrees):
     groups = {}
     for task, result in zip(tasks, results):
         if task["isolation"] == "managed-worktree" and result["patch_bytes"] > 0:
-            groups.setdefault(task["git_root"], []).append((task, result))
+            groups.setdefault((task["git_root"], task["base_oid"]), []).append((task, result))
 
     checks = []
-    occupied = {task["name"].casefold() for task in tasks}
-    index = 0
-    for root, group in groups.items():
+    for (root, base_oid), group in groups.items():
         lock = group[0][0]["lock"]
         patches = [result["patch_file"] for _, result in group]
         counts = Counter(path for _, result in group for path in set(result["changed_files"]))
@@ -468,37 +584,18 @@ def check_merges(tasks, results, worktrees):
         errors = []
         try:
             git(root, "apply", "--check", *patches)
+            target_apply_ok = True
         except (OSError, subprocess.CalledProcessError) as exc:
             errors.append(f"Working tree apply check: {error_text(exc)}")
-
-        if len(patches) >= 2:
-            while True:
-                verify = worktrees / f"_merge_check_{index}"
-                index += 1
-                if verify.name.casefold() not in occupied and not verify.exists() and not verify.is_symlink():
-                    break
-            created = False
-            try:
-                add_worktree(root, verify, lock)
-                created = True
-                for patch in patches:
-                    try:
-                        git(verify, "apply", patch)
-                    except (OSError, subprocess.CalledProcessError) as exc:
-                        errors.append(f"Sequential apply failed for {patch}: {error_text(exc)}")
-                        break
-            except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-                errors.append(f"Verify worktree setup: {error_text(exc)}")
-            finally:
-                if created or verify.exists():
-                    try:
-                        remove_worktree(root, verify, lock)
-                    except (OSError, subprocess.CalledProcessError) as exc:
-                        errors.append(f"Verify worktree cleanup: {error_text(exc)}")
+            target_apply_ok = False
+        base_reconstruct_ok = check_base_reconstruction(root, base_oid, lock, patches, worktrees, errors)
 
         checks.append({
             "git_root": str(root),
-            "ok": not errors,
+            "base_oid": base_oid,
+            "base_reconstruct_ok": base_reconstruct_ok,
+            "target_apply_ok": target_apply_ok,
+            "ok": base_reconstruct_ok and target_apply_ok,
             "overlapping_files": sorted(path for path, count in counts.items() if count >= 2),
             "patches": patches,
             "apply_command": " ".join(shlex.quote(arg) for arg in apply),
@@ -549,7 +646,8 @@ def main():
         return 127
 
     start = time.monotonic()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_dir.chmod(0o700)
     worktrees = out_dir / "_worktrees"
     managed = [task for task in tasks if task["isolation"] == "managed-worktree"]
     if managed:
@@ -557,7 +655,8 @@ def main():
     for task in managed:
         path = worktrees / task["name"]
         try:
-            add_worktree(task["git_root"], path, task["lock"])
+            add_worktree(task["git_root"], path, task["base_oid"], task["lock"])
+            task["worktree_registered"] = True
             task["worktree"] = path
         except (ValueError, OSError, subprocess.CalledProcessError) as exc:
             task["setup_error"] = error_text(exc)
@@ -567,7 +666,8 @@ def main():
         results = [future.result() for future in futures]
     checks = check_merges(tasks, results, worktrees)
     merge_ok = all(check["ok"] for check in checks)
-    all_ok = merge_ok and all(result["exit_code"] == 0 for result in results)
+    all_ok = (merge_ok and all(not check["error"] for check in checks)
+              and all(result["exit_code"] == 0 for result in results))
     summary = {
         "status": "ok" if all_ok else "error",
         "mode": options.mode,
@@ -581,7 +681,7 @@ def main():
         "tasks": results,
     }
     summary_path = out_dir / "parallel-summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    atomic_write(summary_path, (json.dumps(summary, indent=2) + "\n").encode("utf-8"))
     print_summary(summary, summary_path)
     return 0 if all_ok else 1
 

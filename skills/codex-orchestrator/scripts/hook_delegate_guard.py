@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""PreToolUse delegate guard for codex-orchestrator.
+"""PreToolUse delegate guard for codex-orchestrator v3.2.0.
 
 Prevents Gemini from bypassing Codex on non-trivial local code writes/edits
-while allowing Docs/Configs, /tmp specs, <=10-line micro-fixes, and explicit
-user opt-outs. Always fails open on parse or unexpected errors.
+while allowing Docs/Configs, controlled scratch paths, profile-limited edits,
+and explicit user opt-outs. Always fails open on parse or unexpected errors.
 """
 
 from __future__ import annotations
@@ -24,7 +24,14 @@ CODE_EXTS = {
     ".sql", ".lua", ".r",
 }
 CODE_BASENAMES = {"Makefile", "Dockerfile"}
-MAX_DIRECT_EDIT_LINES = 10
+STRICT_EDIT_LIMIT = 10
+PRAGMATIC_EDIT_LIMIT = 30
+DELEGATION_COMMAND_RE = re.compile(r"(?:^|\s)/(?:impl|dag)(?:\s|$)")
+DELEGATION_GUIDANCE = (
+    "Write a task Spec under /tmp/codex-orchestrator/<task-id>/spec.md and use "
+    "1-hop `run_codex.sh implement` first. Use `codex-worker` for multi-round repair loops "
+    "or remote SSH/GPU checks."
+)
 SKIP_CODEX_RE = re.compile(
     r"(?:不用\s*codex|别用\s*codex|不要用\s*codex|跳过\s*codex|不走\s*codex|"
     r"skip\s+codex|without\s+codex|no\s+codex|direct\s+edit|你直接改|你直接写)",
@@ -41,13 +48,15 @@ def deny(reason: str) -> None:
 
 
 def is_safe_temp_or_config_path(path_str: str) -> bool:
-    norm = os.path.normpath(os.path.expanduser(path_str))
-    safe_prefixes = ("/tmp/", "/private/tmp/", "/var/folders/")
-    if norm.startswith(safe_prefixes) or path_str.startswith(safe_prefixes):
-        return True
-    if "/.gemini/" in norm or "/.gemini/" in path_str:
-        return True
-    return False
+    # realpath resolves symlinks in the existing prefix, even for a new file.
+    path = Path(os.path.realpath(os.path.expanduser(path_str)))
+    safe_roots = (
+        Path(os.path.realpath("/tmp")) / "codex-orchestrator",
+        Path("/tmp/codex-orchestrator"),
+        Path("/private/tmp/codex-orchestrator"),
+        Path(os.path.realpath(os.path.expanduser("~/.gemini/antigravity/brain"))),
+    )
+    return any(path == root or root in path.parents for root in safe_roots)
 
 
 def is_code_file(path_str: str) -> bool:
@@ -110,16 +119,20 @@ def main() -> int:
             allow()
             return 0
 
+        profile = os.environ.get("CODEX_GUARD_PROFILE", "strict").strip().lower()
+        limit = STRICT_EDIT_LIMIT
+        if profile == "pragmatic" and not DELEGATION_COMMAND_RE.search(last_user):
+            limit = PRAGMATIC_EDIT_LIMIT
+
         if tool_name in ("write_file", "write_to_file"):
             content = str(args.get("Content") or args.get("CodeContent") or "")
-            if args.get("Append"):
+            if args.get("Append") is True:
                 line_count = len(content.splitlines())
-                if line_count > MAX_DIRECT_EDIT_LINES:
+                if line_count > limit:
                     deny(
                         f"codex-delegate-guard: Appending {line_count} lines to code file "
-                        f"'{target_path}' exceeds the <= {MAX_DIRECT_EDIT_LINES}-line direct-edit limit. "
-                        "Write a task Spec under /tmp/codex-orchestrator/<task-id>/spec.md and "
-                        "delegate implementation to the `codex-worker` subagent or `run_codex.sh implement`."
+                        f"'{target_path}' exceeds the {limit}-line direct-edit limit. "
+                        + DELEGATION_GUIDANCE
                     )
                     return 0
                 allow()
@@ -127,8 +140,7 @@ def main() -> int:
 
             deny(
                 f"codex-delegate-guard: Creating or overwriting code file '{target_path}' must be "
-                "delegated to Codex. Write a task Spec under /tmp/codex-orchestrator/<task-id>/spec.md "
-                "and delegate to the `codex-worker` subagent or `run_codex.sh implement`."
+                "delegated to Codex. " + DELEGATION_GUIDANCE
             )
             return 0
 
@@ -147,12 +159,11 @@ def main() -> int:
                 new_t = str(args.get("Replacement") or args.get("ReplacementContent") or "")
                 changed = count_changed_lines(old_t, new_t)
 
-            if changed > MAX_DIRECT_EDIT_LINES:
+            if changed > limit:
                 deny(
                     f"codex-delegate-guard: Editing {changed} lines in code file '{target_path}' "
-                    f"exceeds the <= {MAX_DIRECT_EDIT_LINES}-line direct-edit limit. "
-                    "Write a task Spec under /tmp/codex-orchestrator/<task-id>/spec.md and "
-                    "delegate implementation to the `codex-worker` subagent or `run_codex.sh implement`."
+                    f"exceeds the {limit}-line direct-edit limit. "
+                    + DELEGATION_GUIDANCE
                 )
                 return 0
 

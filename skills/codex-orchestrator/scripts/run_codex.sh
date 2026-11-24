@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-run_codex.sh v3.0.0
+run_codex.sh v3.2.0
 
 Usage:
   run_codex.sh consult   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
@@ -37,6 +37,12 @@ Common options:
   --worktree             Run in a managed Git worktree (requires a Git repo, unavailable for resume)
   -c, --config <k=v>     Additional Codex TOML config override (repeatable)
   --timeout <SECONDS>    Kill Codex process group after N seconds and exit 124
+  --stall-timeout <SECONDS>
+                        Kill Codex after N seconds without event output and exit 125
+                        (disabled by default)
+  --stdout-mode <auto|compact|full>
+                        Last-message display (default: auto)
+  --invocation-id <ID>   Non-empty run ID for summary.json (default: generated UUID4 hex)
   --max-cmds <N>         Prompt command budget (0 disables the footer)
                         Defaults: implement=12, research/analyze=10,
                         consult/critique/resume/read-only review=8, native review=0
@@ -96,15 +102,6 @@ case "$1" in
     ;;
 esac
 
-CODEX_BIN="$(command -v codex || true)"
-if [[ -z "$CODEX_BIN" && -x /opt/homebrew/bin/codex ]]; then
-  CODEX_BIN="/opt/homebrew/bin/codex"
-fi
-if [[ -z "$CODEX_BIN" ]]; then
-  echo "Error: 'codex' binary not found in PATH or /opt/homebrew/bin/codex" >&2
-  exit 127
-fi
-
 TARGET_DIR="."
 SPEC_FILE=""
 PROMPT_TEXT=""
@@ -123,6 +120,9 @@ RULES_CHOICE=""
 EPHEMERAL=false
 WORKTREE=false
 TIMEOUT_S=0
+STALL_TIMEOUT_S=0
+STDOUT_MODE="auto"
+INVOCATION_ID=""
 MAX_CMDS=0
 MAX_CMDS_SET=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -255,13 +255,33 @@ while [[ $# -gt 0 ]]; do
       EXTRA_CONFIGS+=("$2")
       shift 2
       ;;
-    --timeout)
-      [[ $# -ge 2 ]] || { echo "Error: --timeout requires a positive integer (seconds)" >&2; exit 2; }
+    --timeout|--stall-timeout)
+      [[ $# -ge 2 ]] || { echo "Error: $1 requires a positive integer (seconds)" >&2; exit 2; }
       if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Error: --timeout must be a positive integer (seconds), got '$2'" >&2
+        echo "Error: $1 must be a positive integer (seconds), got '$2'" >&2
         exit 2
       fi
-      TIMEOUT_S="$2"
+      if [[ "$1" == "--timeout" ]]; then
+        TIMEOUT_S="$2"
+      else
+        STALL_TIMEOUT_S="$2"
+      fi
+      shift 2
+      ;;
+    --stdout-mode)
+      [[ $# -ge 2 ]] || { echo "Error: --stdout-mode requires a value" >&2; exit 2; }
+      case "$2" in
+        auto|compact|full) STDOUT_MODE="$2" ;;
+        *) echo "Error: invalid --stdout-mode '$2'; expected auto, compact, or full" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    --invocation-id)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --invocation-id requires a non-empty ID" >&2
+        exit 2
+      fi
+      INVOCATION_ID="$2"
       shift 2
       ;;
     --max-cmds)
@@ -399,7 +419,7 @@ if [[ -n "$EFFORT" ]]; then
   esac
 fi
 
-if [[ -n "$SPEC_FILE" && ! -r "$SPEC_FILE" ]]; then
+if [[ -n "$SPEC_FILE" && ( -d "$SPEC_FILE" || ! -r "$SPEC_FILE" ) ]]; then
   echo "Error: spec file is missing or unreadable: $SPEC_FILE" >&2
   exit 2
 fi
@@ -416,17 +436,24 @@ if [[ "$STRUCTURED" == true ]]; then
     analyze) SCHEMA_FILE="$REF_DIR/analysis-output-schema.json" ;;
     *) SCHEMA_FILE="$REF_DIR/codex-output-schema.json" ;;
   esac
-  if [[ ! -f "$SCHEMA_FILE" || ! -r "$SCHEMA_FILE" ]]; then
-    echo "Error: bundled structured schema is missing or unreadable: $SCHEMA_FILE" >&2
+elif [[ "$SCHEMA_SET" == true && -z "$SCHEMA_FILE" ]]; then
+  echo "Error: --schema requires a non-empty path" >&2
+  exit 2
+fi
+
+if [[ -n "$SCHEMA_FILE" ]]; then
+  if ! python3 -I -B -c \
+    'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("codex_orch.schema_check", run_name="__main__")' \
+    "$SCRIPT_DIR" preflight "$SCHEMA_FILE"; then
+    if [[ ! -f "$SCHEMA_FILE" || ! -r "$SCHEMA_FILE" ]]; then
+      echo "Error: schema file is missing or unreadable: $SCHEMA_FILE" >&2
+    fi
     exit 2
   fi
-elif [[ "$SCHEMA_SET" == true ]]; then
-  if [[ ! -f "$SCHEMA_FILE" || ! -r "$SCHEMA_FILE" ]]; then
-    echo "Error: schema file is missing or unreadable: $SCHEMA_FILE" >&2
-    exit 2
+  if [[ "$SCHEMA_SET" == true ]]; then
+    SCHEMA_FILE="$(canonical_file_path "$SCHEMA_FILE")"
+    SCHEMA_FILE="${SCHEMA_FILE%.}"
   fi
-  SCHEMA_FILE="$(canonical_file_path "$SCHEMA_FILE")"
-  SCHEMA_FILE="${SCHEMA_FILE%.}"
 fi
 
 if [[ "$MODE" != "review" && -z "$SPEC_FILE" && -z "$PROMPT_TEXT" ]]; then
@@ -513,16 +540,62 @@ if [[ "$WORKTREE" == true && "$IS_GIT_REPO" == false ]]; then
   exit 2
 fi
 
+if [[ "$USER_CONFIG_CHOICE" == "use" && -e "$HOME/.codex/config.toml" && ! -r "$HOME/.codex/config.toml" ]]; then
+  echo "Error: --use-user-config requires read access to $HOME/.codex/config.toml" >&2
+  exit 2
+fi
+
+if [[ "$RULES_CHOICE" == "--use-rules" && -e "$HOME/.codex/rules" && ! -r "$HOME/.codex/rules" ]]; then
+  echo "Error: --use-rules requires read access to $HOME/.codex/rules" >&2
+  exit 2
+fi
+
+if [[ "$MODE" == "implement" && "$WORKTREE" == false && "${CODEX_ORCH_ALLOW_INPLACE_SELF_EDIT:-0}" != "1" ]]; then
+  python3 - "$SCRIPT_DIR" "$TARGET_DIR" ${ADD_DIRS[@]+"${ADD_DIRS[@]}"} <<'PY' || exit 2
+import os
+import sys
+
+script_dir = os.path.realpath(sys.argv[1])
+for directory in sys.argv[2:]:
+    root = os.path.realpath(directory)
+    common = os.path.commonpath((root, script_dir))
+    if common in (root, script_dir):
+        print(
+            f"Error: the writable directory {root} overlaps the running orchestrator scripts. "
+            "Pass --worktree or run from a frozen /tmp copy of the scripts.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+PY
+fi
+
+CODEX_BIN="$(command -v codex || true)"
+if [[ -z "$CODEX_BIN" && -x /opt/homebrew/bin/codex ]]; then
+  CODEX_BIN="/opt/homebrew/bin/codex"
+fi
+if [[ -z "$CODEX_BIN" ]]; then
+  echo "Error: 'codex' binary not found in PATH or /opt/homebrew/bin/codex" >&2
+  exit 127
+fi
+
 if [[ -z "$OUT_DIR" ]]; then
   OUT_DIR="/tmp/codex-orchestrator/${MODE}-$(date +%Y%m%d-%H%M%S)-$$"
 fi
-mkdir -p "$OUT_DIR"
+python3 -I -B - "$SCRIPT_DIR" "$OUT_DIR" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from codex_orch.env import ensure_private_dir
+
+ensure_private_dir(sys.argv[2])
+PY
 
 LAST_MSG_FILE="$OUT_DIR/last_message.md"
 EVENTS_FILE="$OUT_DIR/events.jsonl"
 STDERR_FILE="$OUT_DIR/stderr.log"
 THREAD_ID_FILE="$OUT_DIR/thread_id.txt"
 SUMMARY_JSON_FILE="$OUT_DIR/summary.json"
+SUPERVISOR_META_FILE="$OUT_DIR/supervisor_meta.json"
 
 PROMPT_FILE=""
 if [[ "$REVIEW_ENGINE" == "read-only-exec" ]]; then
@@ -833,118 +906,72 @@ build_codex_cmd() {
   esac
 }
 
-run_codex_once() {
-  build_codex_cmd
-  TIMED_OUT=false
-  if [[ -e "$LAST_MSG_FILE" ]]; then
-    : > "$LAST_MSG_FILE"
-  fi
-  set +e
-  if [[ "$TIMEOUT_S" -gt 0 ]]; then
-    PROMPT_INPUT_PATH="${PROMPT_FILE:-/dev/null}"
-    python3 - "$TIMEOUT_S" "$PROMPT_INPUT_PATH" "$EVENTS_FILE" "$STDERR_FILE" "${CMD[@]}" <<'PY'
-import os
-import signal
-import subprocess
-import sys
+build_codex_cmd
+rm -f -- "$LAST_MSG_FILE" "$SUPERVISOR_META_FILE"
 
-timeout_s = int(sys.argv[1])
-in_path, out_path, err_path = sys.argv[2], sys.argv[3], sys.argv[4]
-cmd = sys.argv[5:]
-
-with open(in_path, "rb") as fin, open(out_path, "wb") as fout, open(err_path, "wb") as ferr:
-    proc = subprocess.Popen(
-        cmd,
-        stdin=fin,
-        stdout=fout,
-        stderr=ferr,
-        start_new_session=True,
-    )
-    try:
-        rc = proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-        sys.exit(124)
-    sys.exit(rc)
-PY
-    CODEX_EXIT=$?
-    if [[ "$CODEX_EXIT" -eq 124 ]]; then
-      TIMED_OUT=true
-    fi
-  else
-    if [[ -n "$PROMPT_FILE" ]]; then
-      "${CMD[@]}" < "$PROMPT_FILE" > "$EVENTS_FILE" 2> "$STDERR_FILE"
-    else
-      "${CMD[@]}" < /dev/null > "$EVENTS_FILE" 2> "$STDERR_FILE"
-    fi
-    CODEX_EXIT=$?
+SUPERVISOR_PID=""
+SUPERVISOR_EXIT=""
+WRAPPER_SIGNAL=0
+forward_supervisor_signal() {
+  if (( WRAPPER_SIGNAL == 0 )); then
+    WRAPPER_SIGNAL=$1
   fi
-  set -e
+  if [[ -n "$SUPERVISOR_PID" && -z "$SUPERVISOR_EXIT" ]]; then
+    trap '' TERM INT
+    kill -"$WRAPPER_SIGNAL" "$SUPERVISOR_PID" 2>/dev/null || true
+    wait "$SUPERVISOR_PID"
+    SUPERVISOR_EXIT=$?
+  fi
 }
 
-START_MONO="$(python3 -c 'import time; print(f"{time.time():.6f}")')"
-run_codex_once
-
-if [[ "$CODEX_EXIT" -ne 0 ]]; then
-  RETRY_NEEDED=false
-  if [[ "$IGNORE_USER_CONFIG" == false && -z "$PROFILE" ]] &&
-     grep -Fq 'config.toml: Operation not permitted' "$STDERR_FILE" 2>/dev/null; then
-    IGNORE_USER_CONFIG=true
-    RETRY_NEEDED=true
-  fi
-  if [[ "$IGNORE_RULES" == false ]] &&
-     grep -Eq '(rules files|\.codex/rules).*Operation not permitted' "$STDERR_FILE" 2>/dev/null; then
-    IGNORE_RULES=true
-    RETRY_NEEDED=true
-  fi
-  if [[ "$RETRY_NEEDED" == true ]]; then
-    run_codex_once
-  fi
+set +e
+trap 'forward_supervisor_signal 15' TERM
+trap 'forward_supervisor_signal 2' INT
+python3 -I -B -c \
+  'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("codex_orch.supervisor", run_name="__main__")' \
+  "$SCRIPT_DIR" \
+  --timeout "$TIMEOUT_S" --stall-timeout "$STALL_TIMEOUT_S" --prompt-file "${PROMPT_FILE:-}" \
+  --events "$EVENTS_FILE" --stderr "$STDERR_FILE" --meta-out "$SUPERVISOR_META_FILE" -- "${CMD[@]}" &
+SUPERVISOR_PID=$!
+if (( WRAPPER_SIGNAL != 0 )); then
+  forward_supervisor_signal "$WRAPPER_SIGNAL"
 fi
-
-END_MONO="$(python3 -c 'import time; print(f"{time.time():.6f}")')"
-
-STATUS="ok"
-if [[ "$TIMED_OUT" == true ]]; then
-  STATUS="timeout"
-elif [[ "$CODEX_EXIT" -ne 0 ]]; then
-  STATUS="error"
+if [[ -z "$SUPERVISOR_EXIT" ]]; then
+  wait "$SUPERVISOR_PID"
+  SUPERVISOR_EXIT="${SUPERVISOR_EXIT:-$?}"
 fi
+trap - TERM INT
+set -e
 
-python3 - \
+python3 -I -B - \
   "$EVENTS_FILE" "$STDERR_FILE" "$SUMMARY_JSON_FILE" "$THREAD_ID_FILE" \
-  "$STATUS" "$CODEX_EXIT" "$TIMED_OUT" "$MODE" "$EFFECTIVE_MODEL" "$EFFECTIVE_EFFORT" \
+  "$SCRIPT_DIR" "$SUPERVISOR_META_FILE" "$SUPERVISOR_EXIT" "$WRAPPER_SIGNAL" "$MODE" "$EFFECTIVE_MODEL" "$EFFECTIVE_EFFORT" \
   "$EFFECTIVE_SPEED" "$FAST_MODE" "$NO_MCP" "$IGNORE_USER_CONFIG" "$IGNORE_RULES" \
   "$STRUCTURED" "$EPHEMERAL" "$WORKTREE" "$REVIEW_ENGINE" \
-  "$MAX_CMDS" "$TIMEOUT_S" "$START_MONO" "$END_MONO" \
+  "$MAX_CMDS" "$TIMEOUT_S" "$STALL_TIMEOUT_S" "$STDOUT_MODE" "$INVOCATION_ID" \
   "$TARGET_DIR" "$SANDBOX_DESC" "$OUT_DIR" "$LAST_MSG_FILE" \
   "$WEB_SEARCH" "$SCHEMA_FILE" "${#ADD_DIRS[@]}" \
   ${ADD_DIRS[@]+"${ADD_DIRS[@]}"} ${IMAGES[@]+"${IMAGES[@]}"} <<'PY'
 import json
+import os
 import sys
+import uuid
 from collections import deque
+from contextlib import nullcontext
 from pathlib import Path
 
 (
     events_p, stderr_p, summary_p, tid_p,
-    status, exit_code_s, timed_out_s, mode, model, effort,
+    script_dir, supervisor_meta_p, supervisor_exit_s, wrapper_signal_s, mode, model, effort,
     speed, fast_preset_s, no_mcp_s, ignore_cfg_s, ignore_rules_s,
     structured_s, ephemeral_s, worktree_s, review_engine,
-    max_cmds_s, timeout_s, start_s, end_s,
+    max_cmds_s, timeout_s, stall_timeout_s, stdout_mode, invocation_id,
     target_dir, sandbox_desc, out_dir, last_msg_p,
     web_search_s, schema_file, add_dirs_count, *paths
 ) = sys.argv[1:]
+
+sys.path.insert(0, script_dir)
+from codex_orch import compact_stdout, env, schema_check
 
 add_dirs = paths[:int(add_dirs_count)]
 images = paths[int(add_dirs_count):]
@@ -954,9 +981,36 @@ stderr_path = Path(stderr_p)
 summary_path = Path(summary_p)
 tid_path = Path(tid_p)
 
+try:
+    meta = json.loads(Path(supervisor_meta_p).read_text(encoding="utf-8"))
+    codex_exit_code = meta["codex_exit_code"]
+    duration_s = meta["duration_s"]
+    timed_out = meta["timed_out"]
+    stall_timed_out = meta["stall_timed_out"]
+    paused_quota = meta["paused_quota"]
+    cancelled = meta["cancelled"]
+    sig = meta["signal"]
+    if (
+        type(codex_exit_code) is not int
+        or type(duration_s) not in (int, float)
+        or any(type(flag) is not bool for flag in (timed_out, stall_timed_out, paused_quota, cancelled))
+        or (sig is not None and (type(sig) is not int or not 0 < sig < 128))
+    ):
+        raise ValueError("unexpected supervisor metadata types")
+except (OSError, ValueError, TypeError, KeyError) as error:
+    print(f"Error: unable to read supervisor metadata: {error}", file=sys.stderr)
+    codex_exit_code = int(supervisor_exit_s) or 1
+    duration_s = 0.0
+    timed_out = stall_timed_out = paused_quota = cancelled = False
+    sig = None
+
+if not cancelled and (wrapper_signal := int(wrapper_signal_s)):
+    cancelled, sig = True, wrapper_signal
+
 thread_id = ""
 commands = 0
 cmd_output_bytes = 0
+malformed_event_lines = 0
 tokens = {"input": 0, "cached": 0, "output": 0, "reasoning": 0}
 seen_errors = set()
 event_errors = []
@@ -965,16 +1019,21 @@ in_flight = {}
 failed_commands = deque(maxlen=5)
 last_agent_messages = deque(maxlen=3)
 
-if events_path.is_file():
-    for raw_line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw_line.strip()
-        if not line:
+def reject_json_constant(value):
+    raise ValueError(f"invalid JSON constant {value}")
+
+
+event_stream = events_path.open("rb") if events_path.is_file() else nullcontext(())
+with event_stream as events:
+    for raw_line in events:
+        if not raw_line.strip():
             continue
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+            obj = json.loads(raw_line.decode("utf-8"), parse_constant=reject_json_constant)
+        except (ValueError, RecursionError):
+            obj = None
         if not isinstance(obj, dict):
+            malformed_event_lines += 1
             continue
 
         if not thread_id:
@@ -1001,7 +1060,7 @@ if events_path.is_file():
             if etype == "item.started":
                 command = item.get("command")
                 if item_type == "command_execution" and isinstance(item_id, str) and isinstance(command, str):
-                    in_flight[item_id] = command[:200]
+                    in_flight[item_id] = env.redact_secrets(command)[:200]
                 continue
 
             if isinstance(item_id, str):
@@ -1017,8 +1076,8 @@ if events_path.is_file():
                     command = item.get("command")
                     failed_commands.append({
                         "exit_code": exit_code,
-                        "command": command[:200] if isinstance(command, str) else "",
-                        "output_tail": out_text[-300:],
+                        "command": env.redact_secrets(command)[:200] if isinstance(command, str) else "",
+                        "output_tail": env.redact_secrets(out_text)[-300:],
                     })
             elif item_type == "file_change":
                 changes = item.get("changes")
@@ -1039,7 +1098,7 @@ if events_path.is_file():
             val = obj.get("message")
             if isinstance(val, str) and val and val not in seen_errors:
                 seen_errors.add(val)
-                event_errors.append(f"error: {val}")
+                event_errors.append(f"error: {env.redact_secrets(val)}")
         elif etype == "turn.failed":
             err = obj.get("error")
             msg = ""
@@ -1051,97 +1110,70 @@ if events_path.is_file():
                 msg = err
             if msg and msg not in seen_errors:
                 seen_errors.add(msg)
-                event_errors.append(f"turn.failed: {msg}")
+                event_errors.append(f"turn.failed: {env.redact_secrets(msg)}")
 
 stderr_errors = 0
+stderr_tail = deque(maxlen=30)
 if stderr_path.is_file():
-    for line in stderr_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if "ERROR" in line:
-            stderr_errors += 1
+    with stderr_path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            stderr_tail.append(line)
+            if "ERROR" in line:
+                stderr_errors += 1
 
 if thread_id:
     tid_path.write_text(thread_id + "\n", encoding="utf-8")
 else:
     thread_id = "unknown"
 
-duration_s = round(max(0.0, float(end_s) - float(start_s)), 3)
 cmd_output_kb = round(cmd_output_bytes / 1024.0, 2)
-
-
-def reject_json_constant(value):
-    raise ValueError(f"invalid JSON constant {value}")
-
-
-def json_equal(left, right):
-    if isinstance(left, bool) or isinstance(right, bool):
-        return left is right
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(json_equal(a, b) for a, b in zip(left, right))
-    if isinstance(left, dict) and isinstance(right, dict):
-        return left.keys() == right.keys() and all(json_equal(left[k], right[k]) for k in left)
-    return left == right
-
-
-def matches_schema(value, schema):
-    if isinstance(schema, bool):
-        return schema
-    if not isinstance(schema, dict):
-        return False
-
-    value_type = type(value)
-    matches_type = {
-        "object": value_type is dict,
-        "array": value_type is list,
-        "string": value_type is str,
-        "integer": value_type is int or (value_type is float and value.is_integer()),
-        "number": value_type in (int, float),
-        "boolean": value_type is bool,
-        "null": value is None,
-    }
-    if "type" in schema:
-        types = schema["type"]
-        if not isinstance(types, list):
-            types = [types]
-        if not any(matches_type.get(name, False) for name in types):
-            return False
-    if "enum" in schema and not any(json_equal(value, item) for item in schema["enum"]):
-        return False
-
-    if isinstance(value, dict):
-        if not all(key in value for key in schema.get("required", [])):
-            return False
-        properties = schema.get("properties", {})
-        additional = schema.get("additionalProperties", True)
-        return all(matches_schema(item, properties.get(key, additional)) for key, item in value.items())
-    if isinstance(value, list) and "items" in schema:
-        return all(matches_schema(item, schema["items"]) for item in value)
-    return True
-
+max_cmds = int(max_cmds_s)
+budget_exceeded = max_cmds > 0 and commands > max_cmds
+budget_utilization = commands / max_cmds if max_cmds > 0 else None
+cmd_per_modified_file = commands / len(modified_files) if modified_files else None
 
 last_msg_path = Path(last_msg_p)
-last_message_bytes = last_msg_path.read_bytes() if last_msg_path.is_file() else b""
+last_message = last_msg_path.read_bytes() if last_msg_path.is_file() else b""
+structured = structured_s == "true"
 structured_valid = None
 structured_error = None
-if status == "ok" and (structured_s == "true" or schema_file):
-    try:
-        instance = json.loads(last_message_bytes.decode("utf-8"), parse_constant=reject_json_constant)
-    except (ValueError, RecursionError):
-        structured_error = "is not valid JSON"
-    else:
-        if schema_file:
-            try:
-                schema = json.loads(Path(schema_file).read_text(encoding="utf-8"),
-                                    parse_constant=reject_json_constant)
-                if not matches_schema(instance, schema):
-                    structured_error = f"does not match the JSON Schema in {schema_file}"
-            except (OSError, ValueError, TypeError, RecursionError) as error:
-                structured_error = f"could not be validated against the JSON Schema in {schema_file}: {error}"
-    structured_valid = structured_error is None
+if codex_exit_code == 0 and not (cancelled or timed_out or stall_timed_out or paused_quota) and (structured or schema_file):
+    structured_valid, structured_error, _ = schema_check.validate_last_message(
+        last_message, schema_file or None
+    )
+
+if cancelled:
+    status, wrapper_exit_code = "cancelled", 128 + (sig or 15)
+elif stall_timed_out:
+    status, wrapper_exit_code = "stall_timeout", 125
+elif timed_out:
+    status, wrapper_exit_code = "timeout", 124
+elif paused_quota:
+    status, wrapper_exit_code = "paused_quota", codex_exit_code or 75
+elif codex_exit_code != 0:
+    status, wrapper_exit_code = "error", codex_exit_code
+elif (structured or schema_file) and structured_valid is False:
+    status, wrapper_exit_code = "schema_error", 3
+else:
+    status, wrapper_exit_code = "ok", 0
+
+preview, stdout_truncated = "", False
+if last_message:
+    preview, stdout_truncated = compact_stdout.format_last_message_preview(
+        last_message, mode=stdout_mode, threshold_bytes=4096, max_preview_bytes=2048,
+        last_message_path=last_msg_p, summary_path=summary_p,
+    )
 
 summary = {
     "status": status,
-    "exit_code": int(exit_code_s),
-    "timed_out": timed_out_s == "true",
+    "exit_code": wrapper_exit_code,
+    "codex_exit_code": codex_exit_code,
+    "cancelled": cancelled,
+    "signal": sig,
+    "invocation_id": invocation_id or uuid.uuid4().hex,
+    "timed_out": timed_out,
+    "stall_timed_out": stall_timed_out,
+    "paused_quota": paused_quota,
     "mode": mode,
     "model": model,
     "effort": effort,
@@ -1151,7 +1183,7 @@ summary = {
     "no_mcp": no_mcp_s == "true",
     "ignore_user_config": ignore_cfg_s == "true",
     "ignore_rules": ignore_rules_s == "true",
-    "structured": structured_s == "true",
+    "structured": structured,
     "structured_valid": structured_valid,
     "schema_file": schema_file,
     "web_search": web_search_s == "true",
@@ -1161,11 +1193,16 @@ summary = {
     "review_engine": review_engine,
     "add_dirs": add_dirs,
     "modified_files": list(modified_files),
-    "max_cmds": int(max_cmds_s),
+    "max_cmds": max_cmds,
+    "budget_exceeded": budget_exceeded,
+    "budget_utilization": budget_utilization,
+    "cmd_per_modified_file": cmd_per_modified_file,
     "timeout_s": int(timeout_s),
+    "stall_timeout_s": int(stall_timeout_s),
     "duration_s": duration_s,
     "thread_id": thread_id,
     "commands": commands,
+    "malformed_event_lines": malformed_event_lines,
     "cmd_output_kb": cmd_output_kb,
     "tokens": tokens,
     "stderr_errors": stderr_errors,
@@ -1173,6 +1210,9 @@ summary = {
     "sandbox": sandbox_desc,
     "out_dir": out_dir,
     "last_message": last_msg_p,
+    "last_message_bytes": len(last_message),
+    "stdout_mode": stdout_mode,
+    "stdout_truncated": stdout_truncated,
     "events": events_p,
     "stderr": stderr_p,
     "summary_json": summary_p,
@@ -1184,7 +1224,9 @@ if status != "ok":
         "failed_commands": list(failed_commands),
         "in_flight_commands": list(in_flight.values())[:5],
     }
-summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+summary_tmp = summary_path.with_name(f".summary.json.tmp.{os.getpid()}")
+summary_tmp.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+os.replace(summary_tmp, summary_path)
 
 
 def print_field(key):
@@ -1192,7 +1234,7 @@ def print_field(key):
     print(f"{key}: {json.dumps(value) if isinstance(value, bool) else value}")
 
 
-for key in ("status", "exit_code", "mode", "model", "effort", "fast", "speed", "no_mcp",
+for key in ("status", "exit_code", "codex_exit_code", "mode", "model", "effort", "fast", "speed", "no_mcp",
             "ignore_user_config", "ignore_rules", "structured", "web_search"):
     print_field(key)
 if review_engine:
@@ -1200,9 +1242,9 @@ if review_engine:
 if structured_valid is not None:
     print_field("structured_valid")
     if structured_error:
-        flag = "--structured" if structured_s == "true" else "--schema"
-        print(f"warning: {flag} output in last_message.md {structured_error}", file=sys.stderr)
-for key in ("duration_s", "commands", "cmd_output_kb"):
+        flag = "--structured" if structured else "--schema"
+        print(f"warning: {flag} output in last_message.md {env.redact_secrets(structured_error)}", file=sys.stderr)
+for key in ("duration_s", "commands", "cmd_output_kb", "budget_exceeded", "stdout_truncated"):
     print_field(key)
 print(f"tokens: in={tokens['input']} cached={tokens['cached']} out={tokens['output']} reason={tokens['reasoning']}")
 for key in ("stderr_errors", "dir", "sandbox", "thread_id", "out_dir",
@@ -1221,19 +1263,17 @@ if any(progress.values()):
             suffix = f" (+{len(entries) - 5} more in summary.json)" if len(entries) > 5 else ""
             print(f"{key}: {detail}{suffix}")
 
-if last_message_bytes:
-    print("--- last_message ---", flush=True)
-    sys.stdout.buffer.write(last_message_bytes)
-    sys.stdout.buffer.flush()
+if preview:
+    print("--- last_message ---")
+    print(preview, end="" if preview.endswith("\n") else "\n")
 
 if status != "ok" and event_errors:
     print("--- event_errors ---")
     print("\n".join(event_errors))
+
+if wrapper_exit_code != 0 and stderr_tail:
+    print("--- stderr (tail) ---")
+    print(env.redact_secrets("".join(stderr_tail)), end="")
+
+sys.exit(wrapper_exit_code)
 PY
-
-if [[ "$CODEX_EXIT" -ne 0 && -s "$STDERR_FILE" ]]; then
-  echo "--- stderr (tail) ---"
-  tail -n 30 "$STDERR_FILE"
-fi
-
-exit "$CODEX_EXIT"

@@ -1,15 +1,13 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "General-purpose Dual-Brain orchestration plugin for Google Antigravity (v3.1): Gemini plans, freezes research/data corpora, orchestrates codex-worker or Codex CLI across coding (/impl, /review, /dag) and research/red-team/analysis (/research, /debate, /analyze) with strict JSON schemas, layered verification, and the v3.1 dynamic Communication Charter.",
-  "version": "3.1.0",
+  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.2): Gemini manages scope and frozen corpora while local Codex CLI executes scoped code (/impl, /dag), Git reviews (/review), and structured research/debate/analysis (/research, /debate, /analyze) with verified patch custody and fail-closed evidence.",
+  "version": "3.2.0",
+  "logo": "assets/logo.svg",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
-    "/impl Explore the codebase, write a Spec, delegate implementation to codex-worker / Codex CLI, verify, and brief me clearly",
-    "/review Run a single-pass structured Codex CLI review on uncommitted changes and summarize key risks in plain Chinese",
-    "/dag Lock a shared contract, run parallel managed-worktree Codex workers, check merge conflicts, and brief me",
-    "/research Freeze a source corpus, run parallel Codex research + blind critique, spot-check citations, and brief me",
-    "/debate Run a blind red-team Codex critique on this proposal, adjudicate P0/P1 challenges, and give a decision matrix",
-    "/analyze Cross-check paper/theory, code, and experiment metrics with Codex analyze mode and highlight discrepancies"
+    "/impl Write a Spec, delegate scoped implementation to Codex CLI, verify independently, and brief me",
+    "/dag Lock a shared contract, run parallel managed-worktree Codex workers with patch custody checks, and brief me",
+    "/research Freeze a source corpus, run parallel Codex research and blind critique, spot-check citations, and brief me"
   ]
 }
