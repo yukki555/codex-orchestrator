@@ -23,4 +23,6 @@ Execute strictly in order:
    * Read `summary.json` (`structured_valid: true`) and `last_message.md`.
    * Independently verify every `P0` and `P1` challenge against actual code, data, or source docs via `read_file` / read-only checks. Separate **substantiated challenges** from **false alarms / out-of-scope concerns**.
 4. **Chinese Decision Brief**:
-   * Synthesize strengths, substantiated P0/P1 risks, missing alternatives, verified vs derived vs unverified boundaries, and a concise option-by-option decision matrix in calm, precise natural Chinese following the **deep research / red-team / analysis route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`. Never paste raw Codex output.
+   * Synthesize strengths, substantiated P0/P1 risks, missing alternatives, verified vs derived vs unverified boundaries, and an option-by-option decision matrix in calm, precise natural Chinese following the **deep research / red-team / analysis route** of the Communication Charter v3.2 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`. Never paste raw Codex output.
+
+Apply the Charter’s Synthesis Firewall. Preserve exact evidence anchors and measured values, rewrite working shorthand and internal codes as self-contained Chinese, and disclose gaps. Routine `consult` defaults to `gpt-6.2-sol`. Deep `research`, `critique`, and `analyze` default to `gpt-6.2-astra`.

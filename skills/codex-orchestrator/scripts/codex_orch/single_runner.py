@@ -26,7 +26,7 @@ RESUME_BLOAT_TOKEN_THRESHOLD = 1_000_000
 _SESSION_SEARCH_EXCLUDED_DIRS = {"attempts", "_worktrees", ".git", "__pycache__", "node_modules"}
 MODES = ("consult", "implement", "review", "resume", "research", "critique", "analyze")
 
-USAGE = """run_codex.sh v3.5.1
+USAGE = """run_codex.sh v3.8.0
 
 Usage:
   run_codex.sh consult   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]
@@ -43,6 +43,7 @@ Common options:
                            Prompt passed via stdin
   --model <MODEL|inherit>  Codex model override
   --effort <LEVEL>         low|medium|high|xhigh|max|ultra|inherit
+  --verbosity <LEVEL>      low|medium|high|inherit (defaults by mode)
   --fast                   Use the configured fast preset for unset model/effort
   --speed <TIER>           default|fast|ultrafast|inherit
   --profiles-file <FILE>   Override the bundled execution profiles
@@ -57,9 +58,10 @@ Common options:
   -c, --config <k=v>       Additional Codex TOML configuration (repeatable)
   --timeout <SECONDS>      Wall timeout (exit 124)
   --stall-timeout <SECONDS> Event stream idle timeout (exit 125)
-  --stdout-mode <MODE>     auto (default), compact, or full
+  --stdout-mode <MODE>     auto|compact|facts|full (implement defaults to facts, others to auto)
   --invocation-id <ID>     Non-empty run ID (defaults to a random UUID4 hex ID)
   --max-cmds <N>           Prompt command budget (0 disables the footer)
+  --no-clarity-footer      Skip the Output Clarity Contract in exec prompts
   --add-dir <DIR>          Writable directory for implement or writable resume (repeatable)
   --structured | --schema <FILE>
                            Validate output with a bundled or custom JSON Schema
@@ -89,12 +91,20 @@ Host proof-of-work options (implement with a valid Git HEAD):
 
 BUDGET_FOOTER = """
 ## Execution Budget
-- Batch multi-file reads, searches, and JSON/log parsing into at most {max_cmds} concise python3 or shell commands instead of sequential per-file calls.
+- Batch multi-file reads, searches, and JSON/log parsing into at most {max_cmds} batched python3 or shell commands instead of sequential per-file calls.
 - Never run broad repo scans (rg --files, find, ls -R) when exact paths are already named above.
 - Treat verified inline snapshots/metrics in this prompt as ground truth; do not re-read them unless checking a discrepancy.
-- Keep total command stdout concise (< 20 KB) and stop once required findings are verified.
+- Keep total command stdout under 20 KB and stop once required findings are verified.
 - Do NOT read ~/.codex/skills/* or probe/scan host disks for missing runtimes when environment facts are given in the Spec.
 """
+
+OUTPUT_CLARITY_FOOTER = """
+## Output Clarity Contract
+- Write every summary, rationale, finding, and explanation in complete, self-contained sentences for a reader who has not seen your intermediate reasoning or tool logs.
+- Never carry over internal step/slot codes, working shorthand, telegraphic fragments, or invented compound labels; cite exact repository file paths, symbols, commands, and numbers directly.
+- Explicitly surface every skipped check, unverified assumption, or unresolved blocker rather than omitting it.
+"""
+
 
 DEFAULT_REVIEW = (
     "Review for correctness bugs, edge cases, regressions (including DDP, numerical, and shape "
@@ -119,6 +129,7 @@ class Options:
     model: str = ""
     effort: str = ""
     speed: str = ""
+    verbosity: str = ""
     fast: bool = False
     profile: str = ""
     profiles_file: str | None = None
@@ -130,7 +141,8 @@ class Options:
     config: list[str] = field(default_factory=list)
     timeout: int = 0
     stall_timeout: int = 0
-    stdout_mode: str = "auto"
+    stdout_mode: str = ""
+    no_clarity_footer: bool = False
     invocation_id: str = ""
     max_cmds: int | None = None
     add_dir: list[str] = field(default_factory=list)
@@ -175,13 +187,13 @@ class Options:
 
 
 VALUE_FLAGS = frozenset("""
-    dir spec prompt model effort speed profile profiles-file config timeout stall-timeout
+    dir spec prompt model effort speed verbosity profile profiles-file config timeout stall-timeout
     stdout-mode invocation-id max-cmds add-dir schema image out-dir base commit id sandbox
     contract allowed-path protected-path verify-cmd verify-preset verify-timeout tdd-test-dir
     tdd-test-path
 """.split())
 BOOL_FLAGS = frozenset("""
-    fast ephemeral worktree structured web-search last tdd tdd-from-working-tree tdd-allow-skips
+    fast ephemeral worktree structured no-clarity-footer web-search last tdd tdd-from-working-tree tdd-allow-skips
 """.split())
 REPEATABLE = {"config", "add-dir", "image", "allowed-path", "protected-path", "tdd-test-path"}
 CHOICE_FLAGS = {
@@ -191,7 +203,7 @@ CHOICE_FLAGS = {
 }
 ENUM_FLAGS = {
     "speed": ("default", "fast", "ultrafast", "inherit"),
-    "stdout-mode": ("auto", "compact", "full"),
+    "stdout-mode": ("auto", "compact", "facts", "full"),
 }
 POSITIVE_FLAGS = {"timeout", "stall-timeout", "verify-timeout"}
 
@@ -235,6 +247,8 @@ def parse_args(argv):
             elif name == "config":
                 expectation = "a <key=value> argument"
             raise UsageError(f"{flag} requires {expectation}")
+        if name == "verbosity" and not value:
+            raise UsageError("--verbosity requires a non-empty level")
         if name in ENUM_FLAGS and value not in ENUM_FLAGS[name]:
             prefix = ", ".join(ENUM_FLAGS[name][:-1])
             raise UsageError(f"invalid {flag} '{value}'; expected {prefix}, or {ENUM_FLAGS[name][-1]}")
@@ -511,6 +525,7 @@ class Run:
     effort: str
     speed: str
     speed_explicit: bool
+    verbosity: str
     host: HostPolicy | None
     prior: PriorSession | None
     bloat_reasons: list[str]
@@ -537,6 +552,10 @@ def preflight(options):
     if options.effort and options.effort not in config["valid_efforts"]:
         raise UsageError(f"invalid --effort '{options.effort}'. GPT-6.2 models require one of: "
                          "low, medium, high, xhigh, max, ultra (or 'inherit').")
+    if options.stdout_mode and options.stdout_mode not in config.get("valid_stdout_modes", profiles.STDOUT_MODES):
+        raise UsageError(f"invalid --stdout-mode: {options.stdout_mode!r}")
+    if not options.stdout_mode:
+        options.stdout_mode = profiles.default_stdout_mode(config, mode=options.mode)
     if options.spec and (Path(options.spec).is_dir() or not os.access(options.spec, os.R_OK)):
         raise UsageError(f"spec file is missing or unreadable: {options.spec}")
     if options.structured:
@@ -629,15 +648,19 @@ def preflight(options):
         speed=options.speed or None, speed_explicit=speed_explicit, fast_mode=options.fast,
         profile_name=options.profile or None, prior_model=(prior.model or None) if prior else None,
     )
+    verbosity, verbosity_warnings = profiles.resolve_verbosity(
+        config, mode=options.mode, model=model, verbosity=options.verbosity or None,
+        profile_name=options.profile or None,
+    )
     executable = shutil.which("codex") or shutil.which("/opt/homebrew/bin/codex")
     if not executable:
         raise FileNotFoundError("'codex' binary not found in PATH or /opt/homebrew/bin/codex")
-    for warning in warnings:
+    for warning in [*warnings, *verbosity_warnings]:
         print(warning, file=sys.stderr)
     if bloat_reasons:
         print(f"warning: resuming thread {options.id} despite {', '.join(bloat_reasons)}; "
               "prefer a fresh implement/consult run to avoid context bloat.", file=sys.stderr)
-    return Run(options, target, out, is_git, executable, model, effort, speed, speed_explicit, host,
+    return Run(options, target, out, is_git, executable, model, effort, speed, speed_explicit, verbosity, host,
                prior, bloat_reasons)
 
 
@@ -788,7 +811,7 @@ def make_prompt(run, attempt, protected=()):
         return None
     if opts.spec:
         path = Path(opts.spec)
-        if not (opts.review_engine or opts.max_cmds or protected):
+        if not (opts.review_engine or opts.max_cmds or protected or not opts.no_clarity_footer):
             return str(path)
         body = path.read_bytes()
     else:
@@ -802,10 +825,12 @@ def make_prompt(run, attempt, protected=()):
         body += os.fsencode(footer)
     if opts.max_cmds:
         body += BUDGET_FOOTER.format(max_cmds=opts.max_cmds).encode("utf-8")
+    if not opts.no_clarity_footer:
+        body += OUTPUT_CLARITY_FOOTER.encode("utf-8")
     if opts.review_engine:
         path = attempt.file("review_prompt.md")
         body = review_prompt(run) + body
-    elif opts.max_cmds or protected:
+    elif opts.max_cmds or protected or not opts.no_clarity_footer:
         path = attempt.file("effective_prompt.md")
     else:
         return str(attempt.file("prompt.txt"))
@@ -860,6 +885,8 @@ def codex_command(run, attempt, target):
         configs.append(f"sandbox_workspace_write.writable_roots={toml_roots}")
     if not opts.web_search:
         configs.append('web_search="disabled"')
+    if run.verbosity != "inherit":
+        configs.append(f'model_verbosity="{run.verbosity}"')
     for config in [*configs, *opts.config]:
         command += ["-c", config]
     if opts.mode == "implement":
@@ -1196,7 +1223,8 @@ def announce(summary, preview, schema_error, event_errors, stderr_tail):
         value = summary[key]
         print(f"{key}: {json.dumps(value) if isinstance(value, bool) else value}")
 
-    for key in ("status", "exit_code", "codex_exit_code", "mode", "model", "effort", "fast", "speed", "no_mcp",
+    for key in ("status", "exit_code", "codex_exit_code", "mode", "model", "effort", "fast", "speed",
+                "verbosity", "no_mcp",
                 "ignore_user_config", "ignore_rules", "structured", "web_search"):
         print_field(key)
     if summary["review_engine"]:
@@ -1219,20 +1247,36 @@ def announce(summary, preview, schema_error, event_errors, stderr_tail):
     if summary.get("resume_bloat_warning") is True:
         print(f"tip: resume bloat warning ({', '.join(summary['resume_bloat_reasons'])}); "
               "prefer a fresh implement/consult run")
-    progress = summary.get("partial_progress", {})
-    if any(progress.values()):
+    patch = summary.get("patch")
+    if isinstance(patch, dict):
+        paths = patch.get("changed_files", [])
+        suffix = f" (+{len(paths) - 10} more)" if len(paths) > 10 else ""
+        print(f"host_changed_files: {len(paths)} {json.dumps(paths[:10])}{suffix}")
+        print(f"patch_file: {patch.get('patch_file')}")
+        print(f"patch_bytes: {patch.get('patch_bytes')}")
+    verification = summary.get("verification")
+    if isinstance(verification, dict):
+        ok = json.dumps(verification.get("ok") is True)
+        print(f"host_verification: ok={ok} exit_code={verification.get('exit_code')} "
+              f"file={verification.get('verification_json')}")
+
+    facts_only = summary["stdout_mode"] == "facts"
+    progress = {key: entries for key, entries in summary.get("partial_progress", {}).items()
+                if key != "last_agent_messages" and entries}
+    if progress:
         print("--- partial_progress ---")
         for key, entries in progress.items():
-            if entries:
-                suffix = f" (+{len(entries) - 5} more in summary.json)" if len(entries) > 5 else ""
-                print(f"{key}: {json.dumps(entries[:5])}{suffix}")
+            suffix = f" (+{len(entries) - 5} more in summary.json)" if len(entries) > 5 else ""
+            if facts_only and key == "failed_commands":
+                entries = [{name: entry[name] for name in ("exit_code", "command")} for entry in entries]
+            print(f"{key}: {json.dumps(entries[:5])}{suffix}")
     if preview:
         print("--- last_message ---")
         print(preview, end="" if preview.endswith("\n") else "\n")
-    if summary["status"] != "ok" and event_errors:
+    if not facts_only and summary["status"] != "ok" and event_errors:
         print("--- event_errors ---")
         print("\n".join(event_errors))
-    if summary["exit_code"] and stderr_tail:
+    if not facts_only and summary["exit_code"] and stderr_tail:
         print("--- stderr (tail) ---")
         print(env.redact_secrets("".join(stderr_tail)), end="")
 
@@ -1264,6 +1308,8 @@ def summarize(run, attempt, result, meta, proof, last_message, structured_valid,
         "status": status, "exit_code": exit_code, **meta,
         "invocation_id": opts.invocation_id or uuid.uuid4().hex,
         "mode": opts.mode, "model": run.model, "effort": run.effort, "speed": run.speed,
+        "verbosity": run.verbosity,
+        "clarity_footer": opts.review_engine != "native-review" and not opts.no_clarity_footer,
         "fast": run.speed in ("fast", "ultrafast"), "fast_preset": opts.fast,
         "no_mcp": opts.no_mcp, "ignore_user_config": opts.ignore_user_config,
         "ignore_rules": opts.rules_choice != "--use-rules",

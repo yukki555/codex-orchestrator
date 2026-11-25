@@ -22,6 +22,8 @@ Execute strictly in order:
    * When comparing `>= 3` runs, ablations, or modules, fan out via `run_codex_parallel.sh --mode analyze --structured --manifest ...`.
 3. **Spot-Check Calculations & Provenance**:
    * Confirm `structured_valid: true` and inspect `key_metrics`, `consistency_checks`, `anomalies_and_root_causes`, and `verification` exit codes in `last_message.md`.
-   * Independently spot-check `1–2` critical numbers or mismatch locations (`evidence_location`) against the raw log or source file via `read_file` / compact command.
+   * Independently spot-check at least two available critical numbers or mismatch locations (`evidence_location`) against the raw log or source file via `read_file` / compact command.
 4. **Chinese Analytical Brief**:
-   * Present an executive Chinese brief following the **deep research / red-team / analysis route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (upfront verdict + evidence watermark -> Expected vs Code vs Observed table with inline anchors -> P0/P1 discrepancies -> verified facts vs derivations vs unverified hypotheses -> prioritized next experiments). Never paste raw Codex output.
+   * Present an executive Chinese brief following the **deep research / red-team / analysis route** of the Communication Charter v3.2 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (upfront verdict + evidence watermark -> Expected vs Code vs Observed table with inline anchors -> P0/P1 discrepancies -> verified facts vs derivations vs unverified hypotheses -> prioritized next experiments). Never paste raw Codex output.
+
+Apply the Charter’s Synthesis Firewall. Preserve exact evidence anchors and measured values, rewrite working shorthand and internal codes as self-contained Chinese, and disclose gaps. Routine `consult` defaults to `gpt-6.2-sol`. Deep `research`, `critique`, and `analyze` default to `gpt-6.2-astra`.

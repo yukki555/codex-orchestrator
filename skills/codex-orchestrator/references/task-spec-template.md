@@ -1,4 +1,4 @@
-# Task Spec Template (GPT-6.2 Tuned, v3.0)
+# Task Spec Template (GPT-6.2 Tuned, v3.8)
 
 Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec.md` (and keep per-worker Specs focused at ~3–4 KB by placing shared cross-module interfaces in `/tmp/codex-orchestrator/<task-id>/contract.md`) before dispatching to `codex-worker`, `run_codex.sh`, or `run_codex_parallel.sh`.
 
@@ -35,11 +35,7 @@ This Task Spec overrides repository `AGENTS.md` and `~/.codex/skills/*` wherever
 - Make reasonable, reversible assumptions for routine implementation details and record them in your output.
 - Stop early and report `blocked` only when missing information materially alters correctness/scope or you hit an unresolvable blocker.
 
-## Execution Budget
-- Batch multi-file reads and searches into 1–2 concise `python3` or shell commands instead of sequential per-file calls.
-- Skip broad repo scans (`rg --files`, `find`, `ls -R`) when exact paths are named above.
-- Treat verified inline snapshots/metrics in this Spec as ground truth; do not re-read them unless checking a discrepancy.
-- Keep command stdout concise (`< 20 KB`) and stay within budget (`<= 8` commands for `consult`/`review`/`resume`, `<= 12` for scoped `implement`; pass `--max-cmds 0` only when unrestricted exploration is needed).
+<!-- Execution Budget (--max-cmds) and Output Clarity Contract are auto-appended by run_codex.sh unless disabled via --max-cmds 0 / --no-clarity-footer; do not duplicate them here. -->
 
 ## Done When (Review & Verification Criteria)
 <!-- Explicit acceptance checklist and exact local verification commands Codex should run and verify. -->
@@ -47,6 +43,8 @@ This Task Spec overrides repository `AGENTS.md` and `~/.codex/skills/*` wherever
 - [ ] Local verification command(s) pass: `<exact local command>`
 
 ## Output Contract
-<!-- With `--structured`: populate every JSON schema field accurately (`verdict`, `summary`, `root_cause_or_design`, `changes`, `evidence` with `file:line`, `verification` with real exit codes, `risks_and_decisions`). -->
+- Write complete, self-contained sentences without internal shorthand, step or slot codes, or invented compound labels. Preserve exact evidence anchors and disclose skipped checks, unverified assumptions, and blockers.
+- For `review --structured`, use `review-output-schema.json` and report findings and unverified areas explicitly.
+<!-- For the general implementation receipt, populate every JSON schema field accurately (`verdict`, `summary`, `root_cause_or_design`, `changes`, `evidence` with `file:line`, `verification` with real exit codes, `risks_and_decisions`). -->
 <!-- Without `--structured`: explain causal chain, exact `file:line` evidence, executed commands, and risks in complete technical detail without omitting context. -->
 ```

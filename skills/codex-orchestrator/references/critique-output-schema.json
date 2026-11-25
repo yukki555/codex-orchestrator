@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CodexOrchestratorCritiqueEvidence",
+  "description": "Use complete, self-contained sentences for prose and preserve exact file:line or source_id anchors, symbols, commands, and measured numbers. Omit internal codes, working shorthand, and invented labels. Explicitly disclose skipped checks, unverified claims, and unresolved blockers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,12 +24,14 @@
       ]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "description": "State the outcome and its evidence in self-contained sentences. Identify skipped checks and unresolved uncertainty."
     },
     "strengths": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "State one substantiated strength and the condition under which it holds in a complete sentence."
       }
     },
     "challenges": {
@@ -55,19 +58,24 @@
             ]
           },
           "target_claim": {
-            "type": "string"
+            "type": "string",
+            "description": "Quote or restate the challenged claim in a self-contained sentence."
           },
           "flaw_type": {
-            "type": "string"
+            "type": "string",
+            "description": "Name the flaw in standard technical terms a reader can understand without internal labels."
           },
           "counter_argument": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain the counterexample or causal objection in complete sentences."
           },
           "evidence_or_location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the exact file:line or source_id anchor, or state the concrete counterexample in a complete sentence."
           },
           "suggested_fix": {
-            "type": "string"
+            "type": "string",
+            "description": "Describe a concrete correction and the behavior it should produce in a complete sentence."
           }
         }
       }
@@ -75,13 +83,15 @@
     "missing_alternatives": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Describe an omitted alternative and why it warrants consideration in a complete sentence."
       }
     },
     "unverified_assumptions": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Name the assumption or skipped check and explain what evidence is missing in a complete sentence."
       }
     },
     "decision_matrix": {
@@ -97,13 +107,16 @@
         ],
         "properties": {
           "option": {
-            "type": "string"
+            "type": "string",
+            "description": "Identify the actual option by a descriptive name a reader can recognize without an internal label."
           },
           "pros": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain the option’s advantages and their conditions in complete sentences."
           },
           "cons": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain the option’s drawbacks or unresolved risks in complete sentences."
           },
           "risk_level": {
             "type": "string",

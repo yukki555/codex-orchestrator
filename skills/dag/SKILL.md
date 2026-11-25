@@ -19,11 +19,11 @@ Execute strictly in order:
 3. **Stage 1 — Parallel Managed Worktree Execution & Optional Host Proof-of-Work**:
    * Ensure target checkout is clean (default `--dirty-policy fail`; pass `--dirty-policy head` only to explicitly ignore uncommitted local edits).
    * Run directly via `run_command` (pass `--verify-preset` or `--verify-cmd` to verify the combined reconstructed tree via `verification.json`):
-     `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh --out-dir /tmp/codex-orchestrator/<task-id>/stage1 --mode implement --structured --max-parallel 3 --dir "<repo>" --timeout 240 --manifest /tmp/codex-orchestrator/<task-id>/manifest.json`
+     `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/run_codex_parallel.sh --out-dir /tmp/codex-orchestrator/<task-id>/stage1 --mode implement --structured --stdout-mode facts --max-parallel 3 --dir "<repo>" --timeout 240 --manifest /tmp/codex-orchestrator/<task-id>/manifest.json`
 4. **Patch Custody Preflight & Stage 2 Integration**:
-   * Inspect `parallel-summary.json` (`status`, `merge_ok`, `ownership_table_injected`, `merge_check[*].base_reconstruct_ok`, `target_apply_ok`, `verification_ok`, per-task `custody_verified`, `changed_files`, `patch_file`).
+   * Inspect `parallel-summary.json` for status, mergeability, custody, and patch paths. With `--structured` and `--stdout-mode facts`, inspect `git diff --stat` and key hunks for each patch and read host `verification.json` before `last_message.md`. Audit each Spec `Done When` item and mark missing diff or test proof as unverified.
    * Only when top-level `status == "ok"` **and** `merge_ok` is `true`, apply the clean `changes.patch` files (`git apply`) and run Stage 2 integration on glue files.
 5. **Stage 3 — Parallel Verification & Diff Review**:
    * Run higher-tier / remote GPU tests (outside Codex) concurrently with local `run_codex.sh review --uncommitted --structured`.
 6. **Chinese Executive Brief**:
-   * Synthesize verified architecture, behavioral/contract change map, verification watermark, and real pending gates/decisions in calm, precise natural Chinese following the **heavyweight engineering delivery route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`.
+   * Synthesize verified architecture, behavioral/contract change map, verification watermark, and real pending gates/decisions in calm, precise natural Chinese following the **heavyweight engineering delivery route** of the Communication Charter v3.2 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`.

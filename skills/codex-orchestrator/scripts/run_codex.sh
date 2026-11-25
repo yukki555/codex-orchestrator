@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# codex-orchestrator v3.8.0
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"

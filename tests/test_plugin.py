@@ -94,7 +94,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
         self.assertEqual(plugin["displayName"], "Codex Orchestrator")
-        self.assertEqual(plugin["version"], "3.7.0")
+        self.assertEqual(plugin["version"], "3.8.0")
         self.assertEqual(json.loads(PROFILES.read_text(encoding="utf-8"))["version"], plugin["version"])
         self.assertEqual(plugin["logo"], "assets/logo.svg")
         self.assertTrue((ROOT / plugin["logo"]).is_file())
@@ -132,6 +132,7 @@ class AntigravityPluginTests(unittest.TestCase):
 
     def test_all_output_schemas_are_strict(self):
         required_by_schema = {
+            "review": {"verdict", "summary", "findings", "verification", "unverified_areas"},
             "codex": {
                 "verdict", "summary", "root_cause_or_design", "changes",
                 "evidence", "verification", "risks_and_decisions",
@@ -152,6 +153,9 @@ class AntigravityPluginTests(unittest.TestCase):
 
         def check_node(node, location):
             if isinstance(node, dict):
+                if node.get("type") == "string" and "enum" not in node:
+                    with self.subTest(node=location):
+                        self.assertTrue(node.get("description", "").strip())
                 if node.get("type") == "object":
                     with self.subTest(node=location):
                         self.assertIs(node.get("additionalProperties"), False)
@@ -169,6 +173,7 @@ class AntigravityPluginTests(unittest.TestCase):
             with self.subTest(schema=path.name):
                 schema = json.loads(path.read_text(encoding="utf-8"))
                 self.assertEqual(schema["type"], "object")
+                self.assertTrue(schema.get("description", "").strip())
                 self.assertEqual(set(schema["required"]), required)
                 check_node(schema, "$")
 
@@ -224,11 +229,14 @@ class AntigravityPluginTests(unittest.TestCase):
                 for marker in ("{{args}}", "!{", "~/.gemini/extensions/"):
                     self.assertNotIn(marker, content, f"{path} contains {marker!r}")
 
-    def test_v31_communication_charter_consistency(self):
+    def test_communication_charter_consistency(self):
         charter = REFERENCES / "user-brief-template.md"
         required_markers = {
             charter: (
-                "沟通宪章 v3.1",
+                "沟通宪章 v3.2",
+                "合成防火墙",
+                "客观产物优先",
+                "反静默跳过核查",
                 "表达与保真五条铁律",
                 "按任务量级动态路由",
                 "consult",
@@ -236,17 +244,23 @@ class AntigravityPluginTests(unittest.TestCase):
                 "重量级工程交付",
                 "深度调研 / 红队辩论 / 实验核查",
             ),
-            RULES: ("Communication Charter", "Dynamic Structure Routing", charter.name),
-            ROOT / "README.md": ("v3.7.0", "Communication Charter v3.1", charter.name),
-            SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.1", charter.name),
-            SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.1", "lightweight route", charter.name),
-            SKILLS / "review" / "SKILL.md": ("Communication Charter v3.1", "review", charter.name),
-            SKILLS / "dag" / "SKILL.md": ("Communication Charter v3.1", "heavyweight", charter.name),
-            SKILLS / "research" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
-            SKILLS / "debate" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
-            SKILLS / "analyze" / "SKILL.md": ("Communication Charter v3.1", "deep research", charter.name),
-            SKILLS / "handoff" / "SKILL.md": ("Communication Charter v3.1", charter.name),
+            RULES: ("Communication Charter v3.2", "Dynamic Structure Routing", charter.name),
+            ROOT / "README.md": ("v3.8.0", "Communication Charter v3.2", charter.name),
+            SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.2", charter.name),
+            SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.2", "lightweight route", charter.name),
+            SKILLS / "review" / "SKILL.md": ("Communication Charter v3.2", "review", charter.name),
+            SKILLS / "dag" / "SKILL.md": ("Communication Charter v3.2", "heavyweight", charter.name),
+            SKILLS / "research" / "SKILL.md": ("Communication Charter v3.2", "deep research", charter.name),
+            SKILLS / "debate" / "SKILL.md": ("Communication Charter v3.2", "deep research", charter.name),
+            SKILLS / "analyze" / "SKILL.md": ("Communication Charter v3.2", "deep research", charter.name),
+            SKILLS / "handoff" / "SKILL.md": ("Communication Charter v3.2", charter.name),
         }
+        for template in (REFERENCES / "task-spec-template.md", REFERENCES / "research-spec-template.md"):
+            content = template.read_text(encoding="utf-8")
+            self.assertNotIn("## Execution Budget", content)
+            self.assertNotIn("concise", content.lower())
+        self.assertIn("主表优先使用规范中文概念名", charter.read_text(encoding="utf-8"))
+
         paths = list(required_markers)
         for path in paths:
             content = path.read_text(encoding="utf-8")
@@ -757,8 +771,9 @@ class CodexWrapperTests(CodexTestCase):
             ("sol-high-override", ("implement", "--effort", "high", "--speed", "ultrafast"),
              "gpt-6.2-sol", "high", "ultrafast"),
             ("sol-fast-override", ("implement", "--speed", "fast"), "gpt-6.2-sol", "medium", "fast"),
-            ("astra-medium", ("consult",), "gpt-6.2-astra", "medium", "fast"),
-            ("astra-downgrade", ("consult", "--speed", "ultrafast"), "gpt-6.2-astra", "medium", "fast"),
+            ("sol-consult", ("consult",), "gpt-6.2-sol", "medium", "ultrafast"),
+            ("astra-medium", ("research",), "gpt-6.2-astra", "medium", "fast"),
+            ("astra-downgrade", ("research", "--speed", "ultrafast"), "gpt-6.2-astra", "medium", "fast"),
         ):
             with self.subTest(name=name):
                 self.out = self.temp / name
@@ -777,6 +792,75 @@ class CodexWrapperTests(CodexTestCase):
                 self.assertIs(summary["fast"], speed in ("fast", "ultrafast"))
                 if name == "astra-downgrade":
                     self.assertIn("gpt-6.2-astra does not support ultrafast", result.stderr)
+
+    def test_run_codex_verbosity_routing_and_override(self):
+        profile_path = SKILLS / "codex-orchestrator" / "config" / "profiles.json"
+        profiles = self._read_json(profile_path)
+        profiles["models"]["gpt-6.2-sol"]["supports_verbosity"] = False
+        unsupported = self.corpus / "unsupported.json"
+        unsupported.write_text(json.dumps(profiles), encoding="utf-8")
+        del profiles["valid_verbosities"], profiles["valid_stdout_modes"]
+        del profiles["defaults"]["verbosity_by_mode"], profiles["defaults"]["stdout_mode_by_mode"]
+        for capabilities in (*profiles["models"].values(), profiles["fallback_model_capabilities"]):
+            del capabilities["supports_verbosity"]
+        legacy = self.corpus / "legacy.json"
+        legacy.write_text(json.dumps(profiles), encoding="utf-8")
+
+        for name, mode, flags, expected, config_values in (
+            ("implement", "implement", (), "low", ["low"]),
+            ("consult", "consult", (), "medium", ["medium"]),
+            ("research", "research", (), "medium", ["medium"]),
+            ("override", "consult", ("--verbosity", "high"), "high", ["high"]),
+            ("config", "consult", ("-c", 'model_verbosity="high"'), "medium", ["medium", "high"]),
+            ("inherit", "implement", ("--verbosity", "inherit"), "inherit", []),
+            ("profile", "consult", ("--profile", "example"), "inherit", []),
+            ("profile-override", "consult", ("--profile", "example", "--verbosity", "low"), "low", ["low"]),
+            ("unsupported", "implement", ("--profiles-file", unsupported), "inherit", []),
+            ("legacy", "implement", ("--profiles-file", legacy), "inherit", []),
+        ):
+            with self.subTest(case=name):
+                self.out = self.temp / name
+                result = self._run_wrapper("run_codex.sh", mode, "--dir", self.corpus,
+                                           "--prompt", "Inspect the corpus.", *flags)
+                argv = self._read_json(self.out / "codex-argv.json")
+                self.assertEqual(
+                    [value for flag, value in zip(argv, argv[1:])
+                     if flag == "-c" and value.startswith("model_verbosity=")],
+                    [f'model_verbosity="{value}"' for value in config_values],
+                )
+                summary = self._read_json(self.out / "summary.json")
+                self.assertEqual(summary["verbosity"], expected)
+                self.assertIn(f"verbosity: {expected}\n", result.stdout)
+                if name == "unsupported":
+                    self.assertIn("does not support model verbosity", result.stderr)
+                if name == "legacy":
+                    self.assertEqual(summary["stdout_mode"], "auto")
+
+        self.out = self.temp / "invalid-verbosity"
+        self._consult("--verbosity", "verbose", exit_code=2, error="invalid --verbosity")
+
+    def test_run_codex_clarity_footer_and_no_concise_trigger(self):
+        spec = self.corpus / "spec.md"
+        spec.write_text("Inspect the corpus.\n", encoding="utf-8")
+        for name, flags, budget, clarity, effective in (
+            ("default", (), True, True, True),
+            ("no-budget", ("--max-cmds", 0), False, True, True),
+            ("no-clarity", ("--no-clarity-footer",), True, False, True),
+            ("original", ("--max-cmds", 0, "--no-clarity-footer"), False, False, False),
+        ):
+            with self.subTest(case=name):
+                self.out = self.temp / name
+                self._run_wrapper("run_codex.sh", "consult", "--dir", self.corpus, "--spec", spec, *flags)
+                summary = self._read_json(self.out / "summary.json")
+                prompt = Path(summary["attempt_dir"]) / "effective_prompt.md"
+                self.assertEqual(prompt.exists(), effective)
+                body = (prompt if effective else spec).read_text(encoding="utf-8")
+                self.assertEqual("## Execution Budget" in body, budget)
+                self.assertEqual("## Output Clarity Contract" in body, clarity)
+                self.assertNotIn("concise", body)
+                self.assertIs(summary["clarity_footer"], clarity)
+                if budget and clarity:
+                    self.assertLess(body.index("## Execution Budget"), body.index("## Output Clarity Contract"))
 
     def test_run_codex_structured_validates_last_message(self):
         complete = {
@@ -1464,6 +1548,86 @@ class CodexWrapperTests(CodexTestCase):
                 else:
                     self.assertEqual(preview, message + "\n")
 
+    def test_run_codex_stdout_facts_mode_quarantines_prose_and_commentary(self):
+        commentary = "S1-A mid-flight commentary."
+        final_prose = "W23 final free-text report."
+        raw = {
+            "verdict": "needs_revision", "summary": final_prose,
+            "findings": [{"severity": "P1", "issue": final_prose}, {"severity": "P3"}],
+            "challenges": [{"severity": "P0"}],
+            "verification": [{"exit_code": 0, "key_output": final_prose}, {"exit_code": 2}],
+            "consistency_checks": [{"status": status} for status in ("match", "mismatch", "unverified")],
+            "evidence": {"example": final_prose},
+            "unverified_areas": [final_prose],
+        }
+        agent_message = {"type": "item.completed", "item": {"type": "agent_message", "text": commentary}}
+        failed_command = {"type": "item.completed", "item": {
+            "type": "command_execution", "exit_code": 2, "command": "python3 -B check.py",
+            "aggregated_output": commentary,
+        }}
+        for name, message, structural in (
+            ("object", json.dumps(raw), True),
+            ("non-json", final_prose, False),
+            ("scalar-fields", json.dumps({"summary": final_prose, "verdict": final_prose}), True),
+        ):
+            with self.subTest(case=name):
+                self.out = self.temp / name
+                self.env.update(
+                    TEST_CODEX_EXIT="17", TEST_CODEX_LAST_MESSAGE=message, TEST_CODEX_STDERR=commentary,
+                    TEST_CODEX_EVENTS=json.dumps([
+                        agent_message,
+                        *([failed_command, {"type": "error", "message": commentary}] if name == "object" else []),
+                    ]),
+                )
+                result = self._consult("--stdout-mode", "facts", exit_code=17)
+                summary = self._read_json(self.out / "summary.json")
+                self.assertIs(summary["stdout_truncated"], True)
+                self.assertEqual(summary["partial_progress"]["last_agent_messages"], [commentary])
+                self.assertEqual((self.out / "last_message.md").read_text(encoding="utf-8"), message)
+                self.assertNotIn(commentary, result.stdout)
+                self.assertNotIn(final_prose, result.stdout)
+                self.assertIn(f"[facts preview: {len(message.encode('utf-8'))} bytes", result.stdout)
+                self.assertIn(str(self.out / "last_message.md"), result.stdout)
+                self.assertIn(str(self.out / "summary.json"), result.stdout)
+                self.assertEqual("format: non-json" in result.stdout, not structural)
+                if name == "object":
+                    for expected in (
+                        "verdict: needs_revision", "findings=2 (P1=1, P3=1)", "challenges=1 (P0=1)",
+                        "verification=2 (passed=1, failed=1)", "evidence=1", "unverified_areas=1",
+                        "consistency_checks=3 (match=1, mismatch=1, unverified=1)",
+                        'failed_commands: [{"exit_code": 2, "command": "python3 -B check.py"}]',
+                    ):
+                        self.assertIn(expected, result.stdout)
+                else:
+                    self.assertNotIn("--- partial_progress ---", result.stdout)
+                if name == "scalar-fields":
+                    self.assertIn('keys=["summary", "verdict"]', result.stdout)
+
+        self.out = self.temp / "full-failure"
+        result = self._consult("--stdout-mode", "full", exit_code=17)
+        self.assertNotIn("--- partial_progress ---", result.stdout)
+        self.assertNotIn("last_agent_messages:", result.stdout)
+
+    def test_run_codex_stdout_facts_mode_classifies_non_object_json(self):
+        for name, message, expected in (
+            ("empty-array", "[]", "format: json-array, items=0"),
+            ("nonempty-array", '["secret prose"]', "format: json-array, items=1"),
+            ("null", "null", "format: json-null"),
+            ("boolean", "true", "format: json-boolean"),
+            ("integer", "42", "format: json-number"),
+            ("float", "1.5", "format: json-number"),
+            ("string", '"secret prose"', "format: json-string"),
+            ("invalid", "{broken", "format: non-json"),
+        ):
+            with self.subTest(case=name):
+                self.out = self.temp / name
+                self.env["TEST_CODEX_LAST_MESSAGE"] = message
+                result = self._consult("--stdout-mode", "facts")
+                _, preview = result.stdout.split("--- last_message ---\n", 1)
+                self.assertEqual(preview.splitlines()[0], expected)
+                self.assertNotIn("secret prose", result.stdout)
+                self.assertNotIn("{broken", result.stdout)
+
     def test_run_codex_command_budget_and_malformed_event_telemetry(self):
         commands = [
             {"type": "item.completed", "item": {
@@ -1503,6 +1667,46 @@ class CodexWrapperTests(CodexTestCase):
         self._assert_exec_argv(self.out, target=repo, image=image.resolve())
         summary = self._read_json(self.out / "summary.json")
         self.assertEqual(summary["review_engine"], "read-only-exec")
+
+    def test_run_codex_review_uses_dedicated_review_schema(self):
+        repo = self.temp / "review-repo"
+        subprocess.run(["git", "init", "--quiet", str(repo)], env=self.env, check=True, timeout=15)
+        review_schema = REFERENCES / "review-output-schema.json"
+        receipt = {
+            "verdict": "needs_revision", "summary": "The preview exposes implementation prose.",
+            "findings": [{
+                "severity": "P1", "category": "Output contract", "location": "runner.py:12",
+                "issue": "The preview prints the complete report.",
+                "impact": "The caller receives internal shorthand.",
+                "suggested_fix": "Print the collection count and the report path.",
+            }],
+            "verification": [{"command": "git diff --check", "exit_code": 0, "key_output": "The check passed."}],
+            "unverified_areas": ["Live model output was unavailable."],
+        }
+        self.env["TEST_CODEX_LAST_MESSAGE"] = json.dumps(receipt)
+        result = self._run_wrapper("run_codex.sh", "review", "--dir", repo, "--structured", "--stdout-mode", "compact")
+        self._assert_exec_argv(self.out, target=repo, schema=review_schema.resolve())
+        summary = self._read_json(self.out / "summary.json")
+        self.assertEqual(summary["review_engine"], "read-only-exec")
+        self.assertIs(summary["structured_valid"], True)
+        self.assertIs(summary["clarity_footer"], True)
+        self.assertIn("findings=1 (P1=1)", result.stdout)
+        prompt = (Path(summary["attempt_dir"]) / "review_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("## Output Clarity Contract", prompt)
+
+        self.out = self.temp / "invalid-review"
+        self.env["TEST_CODEX_LAST_MESSAGE"] = json.dumps({**receipt, "findings": [
+            {**receipt["findings"][0], "severity": "P4"},
+        ]})
+        self._run_wrapper("run_codex.sh", "review", "--dir", repo, "--structured", exit_code=3)
+
+        self.out = self.temp / "native-review"
+        del self.env["TEST_CODEX_LAST_MESSAGE"]
+        self._run_wrapper("run_codex.sh", "review", "--dir", repo, "--uncommitted")
+        summary = self._read_json(self.out / "summary.json")
+        self.assertEqual(summary["review_engine"], "native-review")
+        self.assertIs(summary["clarity_footer"], False)
+        self.assertFalse((Path(summary["attempt_dir"]) / "review_prompt.md").exists())
 
     def test_run_codex_research_rejects_add_dir(self):
         self._run_wrapper(
@@ -1556,6 +1760,62 @@ class CodexWrapperTests(CodexTestCase):
                 self._assert_exec_argv(
                     self.out / name, schema=schema.resolve(), search=name == "task-a", image=attachment
                 )
+
+    def test_parallel_forwards_verbosity_clarity_and_stdout_mode(self):
+        config = self._read_json(PROFILES)
+        config["defaults"]["stdout_mode_by_mode"]["consult"] = "full"
+        custom = self.temp / "profiles.json"
+        custom.write_text(json.dumps(config), encoding="utf-8")
+        manifest = self._manifest([
+            {"name": "inherits"},
+            {"name": "overrides", "verbosity": "low", "no_clarity_footer": False, "stdout_mode": "compact"},
+        ])
+
+        # Record the flags at the worker-wrapper boundary, then run the real wrapper.
+        scripts = self.temp / "scripts"
+        scripts.mkdir()
+        parallel = shutil.copy2(SCRIPTS / "run_codex_parallel.sh", scripts)
+        (scripts / "codex_orch").symlink_to(SCRIPTS / "codex_orch", target_is_directory=True)
+        worker = scripts / "run_codex.sh"
+        worker.write_text(dedent(f'''\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            out = Path(args[args.index("--out-dir") + 1])
+            (out / "worker-argv.json").write_text(json.dumps(args), encoding="utf-8")
+            os.execv("/bin/bash", ["bash", {str(SCRIPTS / "run_codex.sh")!r}, *args])
+            '''), encoding="utf-8")
+        worker.chmod(0o755)
+        self._run_wrapper(
+            parallel, "--dir", self.corpus, "--manifest", manifest, "--profiles-file", custom,
+            "--verbosity", "high", "--no-clarity-footer",
+        )
+
+        summary = self._read_json(self.out / "parallel-summary.json")
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual([(task["task"], task["verbosity"]) for task in summary["tasks"]], [
+            ("inherits", "high"), ("overrides", "low"),
+        ])
+        for name, verbosity, footer, stdout_mode in (
+            ("inherits", "high", False, "full"),
+            ("overrides", "low", True, "compact"),
+        ):
+            with self.subTest(task=name):
+                argv = self._read_json(self.out / name / "worker-argv.json")
+                self.assertEqual(argv[argv.index("--profiles-file") + 1], str(custom))
+                self.assertEqual(argv[argv.index("--verbosity") + 1], verbosity)
+                self.assertEqual("--no-clarity-footer" in argv, not footer)
+                if name == "inherits":
+                    self.assertNotIn("--stdout-mode", argv)
+                else:
+                    self.assertEqual(argv[argv.index("--stdout-mode") + 1], "compact")
+                worker_summary = self._read_json(self.out / name / "summary.json")
+                self.assertIs(worker_summary["clarity_footer"], footer)
+                self.assertEqual(worker_summary["stdout_mode"], stdout_mode)
 
     def test_parallel_manifest_can_disable_cli_web_search_per_task(self):
         manifest = self._manifest([
@@ -2057,6 +2317,30 @@ class AppTests(unittest.TestCase):
 
     def _implement_value(self, value):
         self._stub_action(f"(target / 'src/app.py').write_text('def value():\\n    return {value}\\n')\n")
+
+    def test_run_codex_implement_announces_host_verification_first(self):
+        self._stub_action("(target / 'A.txt').write_text('verified change\\n', encoding='utf-8')\n")
+        verify_argv = [
+            "python3", "-B", "-c",
+            "from pathlib import Path; assert Path('A.txt').read_text() == 'verified change\\n'",
+        ]
+        result = self._run_wrapper(
+            "run_codex.sh", "implement", "--dir", self.repo, "--prompt", "Update A.txt.",
+            "--worktree", "--structured", "--verify-cmd", json.dumps(verify_argv),
+        )
+        summary = self._read_json(self.out / "summary.json")
+        self.addCleanup(self._remove_worker, Path(summary["worktree_dir"]))
+        self.assertEqual(summary["stdout_mode"], "facts")
+        self.assertIs(summary["structured_valid"], True)
+        receipt = self._read_json(self.out / "last_message.md")
+        self.assertEqual(receipt["summary"], "Stub response")
+        host, preview = result.stdout.split("--- last_message ---\n", 1)
+        self.assertIn('host_changed_files: 1 ["A.txt"]\n', host)
+        self.assertRegex(host, r"(?m)^patch_file: .+\n")
+        self.assertRegex(host, r"(?m)^patch_bytes: [1-9]\d*\n")
+        self.assertIn("host_verification: ok=true exit_code=0 ", host)
+        self.assertIn("[facts preview:", preview)
+        self.assertNotIn(receipt["summary"], result.stdout)
 
     def test_trusted_contract_command_is_pinned_to_base_oid(self):
         self._unit_fixture(contract={"verify_commands": {"unit": self.UNIT_ARGV}, "protected_paths": ["tests/**"]},

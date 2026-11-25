@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CodexOrchestratorResearchEvidence",
+  "description": "Use complete, self-contained sentences for prose and preserve exact file:line or source_id anchors, symbols, commands, and measured numbers. Omit internal codes, working shorthand, and invented labels. Explicitly disclose skipped checks, unverified claims, and unresolved blockers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +23,8 @@
       ]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "description": "State the outcome and its evidence in self-contained sentences. Identify skipped checks and unresolved uncertainty."
     },
     "claims": {
       "type": "array",
@@ -37,7 +39,8 @@
         ],
         "properties": {
           "statement": {
-            "type": "string"
+            "type": "string",
+            "description": "State the claim and its applicable conditions in a self-contained sentence."
           },
           "confidence": {
             "type": "string",
@@ -50,11 +53,13 @@
           "source_ids": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "description": "Use the exact source_id from the source index, or the exact URL for a live source."
             }
           },
           "quote_or_location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give a literal quotation with its location, or an exact file:line, section, table, or figure anchor tied to a source_id."
           }
         }
       }
@@ -70,7 +75,8 @@
         ],
         "properties": {
           "dimension": {
-            "type": "string"
+            "type": "string",
+            "description": "Name the dimension being evaluated in plain technical language without an internal label."
           },
           "entries": {
             "type": "array",
@@ -84,15 +90,18 @@
               ],
               "properties": {
                 "option": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Identify the actual option by a descriptive name a reader can recognize without an internal label."
                 },
                 "assessment": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "State the supported assessment, its scope, and any evidence limits in complete sentences."
                 },
                 "source_ids": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Use the exact source_id from the source index, or the exact URL for a live source."
                   }
                 }
               }
@@ -113,15 +122,18 @@
         ],
         "properties": {
           "point": {
-            "type": "string"
+            "type": "string",
+            "description": "Describe the conflicting evidence in a self-contained sentence with enough context to understand the conflict."
           },
           "condition_or_scope": {
-            "type": "string"
+            "type": "string",
+            "description": "State where the counterevidence applies and any unresolved boundary in a complete sentence."
           },
           "source_ids": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "description": "Use the exact source_id from the source index, or the exact URL for a live source."
             }
           }
         }
@@ -130,13 +142,15 @@
     "knowledge_gaps": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Describe a specific gap, skipped check, or uncertain claim and the missing evidence in a complete sentence."
       }
     },
     "recommended_next_checks": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Describe a concrete check and the uncertainty it would resolve in a complete sentence."
       }
     }
   }

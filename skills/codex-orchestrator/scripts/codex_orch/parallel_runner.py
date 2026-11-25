@@ -21,29 +21,31 @@ from .schema_check import preflight_schema
 
 MODES = ("consult", "implement", "review", "research", "critique", "analyze")
 SPEEDS = ("default", "fast", "ultrafast", "inherit")
-STDOUT_MODES = ("auto", "compact", "full")
+STDOUT_MODES = ("auto", "compact", "facts", "full")
 OVERRIDES = {
     "model": "--model",
     "effort": "--effort",
     "speed": "--speed",
+    "verbosity": "--verbosity",
     "timeout": "--timeout",
     "stall_timeout": "--stall-timeout",
     "stdout_mode": "--stdout-mode",
     "max_cmds": "--max-cmds",
 }
 BOOLEAN_FLAGS = ("fast", "ephemeral", "structured", "ignore_rules", "use_rules",
-                 "ignore_user_config", "use_user_config", "no_mcp", "with_mcp", "web_search")
+                 "ignore_user_config", "use_user_config", "no_mcp", "with_mcp", "web_search",
+                 "no_clarity_footer")
 MANIFEST_HELP = """Manifest schema
   A JSON array of tasks or an object containing a "tasks" array.
   name          Unique task name using A-Z, a-z, 0-9, dot, underscore or hyphen.
   spec          Spec file path, optional in the effective review mode.
   dir           Working directory.
   mode          consult, implement, review, research, critique or analyze.
-  model, effort, speed
+  model, effort, speed, verbosity
                 String overrides for the corresponding worker flags.
   timeout, stall_timeout
                 Positive integer seconds.
-  stdout_mode   auto, compact or full.
+  stdout_mode   auto, compact, facts or full. Defaults to the worker mode profile.
   max_cmds      Non-negative integer. Zero disables the worker command budget.
   add_dirs      Array of directory paths appended to CLI --add-dir values.
   images        Array of image paths appended to CLI --image values.
@@ -51,7 +53,7 @@ MANIFEST_HELP = """Manifest schema
   allowed_paths, protected_paths
                 Arrays of Git-root-relative globs for managed-worktree edits.
   schema        Custom output schema path overriding CLI --schema.
-  structured, ephemeral, web_search
+  structured, ephemeral, web_search, no_clarity_footer
                 Booleans overriding the corresponding worker flags.
   Relative spec, dir, add_dirs, images and schema paths use the current
   directory first, then the manifest's parent directory.
@@ -109,6 +111,9 @@ def usage():
     parser.add_argument("--model", help="default worker model")
     parser.add_argument("--effort", help="default worker reasoning effort")
     parser.add_argument("--speed", choices=SPEEDS, help="default worker speed tier")
+    parser.add_argument("--verbosity", help="default worker output verbosity (low, medium, high or inherit)")
+    parser.add_argument("--no-clarity-footer", action="store_true",
+                        help="skip the Output Clarity Contract in worker exec prompts")
     parser.add_argument("--fast", action="store_true", help="enable the worker fast preset")
     parser.add_argument("--ephemeral", action="store_true", help="use ephemeral worker sessions")
     parser.add_argument("--web-search", action="store_true", help="enable web search for workers")
@@ -118,8 +123,8 @@ def usage():
                         metavar="SECONDS", help="worker timeout in seconds")
     parser.add_argument("--stall-timeout", type=lambda value: integer(value, positive=True),
                         metavar="SECONDS", help="worker inactivity timeout in seconds")
-    parser.add_argument("--stdout-mode", choices=STDOUT_MODES, default="auto",
-                        help="worker output preview mode (default: auto)")
+    parser.add_argument("--stdout-mode", choices=STDOUT_MODES,
+                        help="worker output preview mode (defaults by worker mode)")
     parser.add_argument("--max-cmds", type=integer, metavar="N",
                         help="worker command budget (0 disables it)")
     parser.add_argument("-c", "--config", action="append", default=[], metavar="K=V",
@@ -270,7 +275,7 @@ def prepare_tasks(options, out_dir, verify_requested):
             target = (manifest_path(entry["dir"], parent, directory)
                       if "dir" in entry else default_dir)
             overrides = {key: entry.get(key, getattr(options, key)) for key in OVERRIDES}
-            for key in ("model", "effort", "speed"):
+            for key in ("model", "effort", "speed", "verbosity"):
                 if key in entry and not isinstance(entry[key], str):
                     raise ValueError(f"{key} must be a string")
             if overrides["effort"] and overrides["effort"] not in config["valid_efforts"]:
@@ -279,13 +284,18 @@ def prepare_tasks(options, out_dir, verify_requested):
                 raise ValueError("speed must be default, fast, ultrafast, or inherit")
             if overrides["speed"] is not None and overrides["speed"] not in config["valid_speeds"]:
                 raise ValueError(f"invalid speed: {overrides['speed']!r}")
-            if overrides["stdout_mode"] not in STDOUT_MODES:
-                raise ValueError("stdout_mode must be auto, compact, or full")
+            valid_verbosities = config.get("valid_verbosities", ("low", "medium", "high", "inherit"))
+            if overrides["verbosity"] is not None and overrides["verbosity"] not in valid_verbosities:
+                raise ValueError(f"invalid verbosity: {overrides['verbosity']!r}")
+            if overrides["stdout_mode"] is not None and (
+                overrides["stdout_mode"] not in config.get("valid_stdout_modes", STDOUT_MODES)
+            ):
+                raise ValueError(f"invalid stdout_mode: {overrides['stdout_mode']!r}")
             for key, minimum in (("timeout", 1), ("stall_timeout", 1), ("max_cmds", 0)):
                 if key in entry and (type(entry[key]) is not int or entry[key] < minimum):
                     raise ValueError(f"{key} must be an integer >= {minimum}")
             flags = {key: getattr(options, key) for key in BOOLEAN_FLAGS}
-            for key in ("structured", "ephemeral", "web_search"):
+            for key in ("structured", "ephemeral", "web_search", "no_clarity_footer"):
                 value = entry.get(key, flags[key])
                 if type(value) is not bool:
                     raise ValueError(f"{key} must be a boolean")
@@ -597,6 +607,7 @@ def run_one(task, run_codex, options, table):
         "model": data.get("model", task["overrides"]["model"]),
         "effort": data.get("effort", task["overrides"]["effort"]),
         "speed": data.get("speed", task["overrides"]["speed"]),
+        "verbosity": data.get("verbosity", task["overrides"]["verbosity"]),
         "status": violation_status or (
             "error" if errors else data.get("status", "ok" if returncode == 0 else "error")
         ),

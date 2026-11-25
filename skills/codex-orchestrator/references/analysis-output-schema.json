@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CodexOrchestratorAnalysisEvidence",
+  "description": "Use complete, self-contained sentences for prose and preserve exact file:line or source_id anchors, symbols, commands, and measured numbers. Omit internal codes, working shorthand, and invented labels. Explicitly disclose skipped checks, unverified claims, and unresolved blockers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,7 +24,8 @@
       ]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "description": "State the outcome and its evidence in self-contained sentences. Identify skipped checks and unresolved uncertainty."
     },
     "key_metrics": {
       "type": "array",
@@ -38,16 +40,20 @@
         ],
         "properties": {
           "metric": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the measured metric’s name and unit, expanding any source-specific abbreviation needed to identify it."
           },
           "value": {
-            "type": "string"
+            "type": "string",
+            "description": "Record the exact measured value with its unit or state explicitly that the value is unverified."
           },
           "source_location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the exact file:line, log record, or source_id anchor where the measurement appears."
           },
           "notes": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain the measurement conditions, limitations, or missing evidence in complete sentences."
           }
         }
       }
@@ -66,7 +72,8 @@
         ],
         "properties": {
           "dimension": {
-            "type": "string"
+            "type": "string",
+            "description": "Name the dimension being evaluated in plain technical language without an internal label."
           },
           "status": {
             "type": "string",
@@ -77,13 +84,16 @@
             ]
           },
           "expected": {
-            "type": "string"
+            "type": "string",
+            "description": "Describe the expected behavior or value and its conditions in a complete sentence."
           },
           "observed": {
-            "type": "string"
+            "type": "string",
+            "description": "State what was actually observed in a complete sentence, including any missing or unverified measurement."
           },
           "evidence_location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give an exact file:line, log record, or source_id anchor. State explicitly when evidence is unavailable."
           }
         }
       }
@@ -101,7 +111,8 @@
         ],
         "properties": {
           "finding": {
-            "type": "string"
+            "type": "string",
+            "description": "Describe the observed anomaly and its scope in a self-contained sentence."
           },
           "severity": {
             "type": "string",
@@ -113,10 +124,12 @@
             ]
           },
           "evidence_location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give an exact file:line, log record, or source_id anchor. State explicitly when evidence is unavailable."
           },
           "explanation": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain the causal evidence and any unverified inference in complete sentences."
           }
         }
       }
@@ -133,13 +146,15 @@
         ],
         "properties": {
           "command": {
-            "type": "string"
+            "type": "string",
+            "description": "Record the exact command that ran, including arguments. Report skipped commands in the field for gaps instead of inventing a run."
           },
           "exit_code": {
             "type": "integer"
           },
           "key_output": {
-            "type": "string"
+            "type": "string",
+            "description": "State the observed result in a complete sentence, preserving exact measurements or relevant output excerpts."
           }
         }
       }
@@ -147,7 +162,8 @@
     "next_experiments": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Specify a concrete experiment and what it would verify in a self-contained sentence."
       }
     }
   }

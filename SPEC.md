@@ -1,10 +1,10 @@
-# Codex Orchestrator Behavioral Specification (`v3.7`)
+# Codex Orchestrator Behavioral Specification (`v3.8.0`)
 
 This document defines the stable **Session / Hands** behavioral invariants and conformance contract for `codex-orchestrator`. Orchestration policies and prompts live in the disposable **Brain** layer (`rules/`, `skills/`).
 
 ## 1. Architecture Boundaries (Brain / Session / Hands)
 
-* **Brain (`rules/`, `skills/`, `workflows/`)**: Lean (`<= 30` lines) always-on Fold-First ladder, 1-hop priority, Spec templates, `/swarm` & `/run-workflow` composition guides, and Communication Charter (`v3.1`).
+* **Brain (`rules/`, `skills/`, `workflows/`)**: Lean (`<= 30` lines) always-on Fold-First ladder, 1-hop priority, Spec templates, `/swarm` & `/run-workflow` composition guides, and Communication Charter (`v3.2`).
 * **Session (Immutable Artifacts & `SPEC.md`)**: Numbered append-only attempt history under `<out-dir>/attempts/attempt-NNN/` with atomic top-level latest publication (`summary.json` written last), plus `changes.patch`, `verification.json`, and `parallel-summary.json`. `resume` discovery ignores `attempts/*/` duplicates.
 * **Hands (`scripts/codex_orch/`, `config/profiles.json`, thin `.sh` shims)**: Zero-dependency Python 3 stdlib execution kernel invoked via `exec python3 -I -B` (immune to CWD shadowing and Bash offset self-edit crashes), separating shared core logic from thin host adapters (`host_adapter.py`).
 
@@ -35,7 +35,11 @@ The Codex supervisor and host verification snapshot descendant PIDs and PGIDs be
 
 ## 3. Declarative Profiles (`config/profiles.json`)
 
-Model defaults, effort defaults, speed tier capabilities (`supports_ultrafast`, `downgrade_ultrafast_to`), `max_cmds` defaults, and bundled schema mappings live declaratively in `skills/codex-orchestrator/config/profiles.json` (overridable via `--profiles-file` or `CODEX_ORCH_PROFILES_FILE`).
+Model, effort, speed, verbosity, stdout, command budgets, and bundled schema mappings are declared in `skills/codex-orchestrator/config/profiles.json` (override with `--profiles-file` or `CODEX_ORCH_PROFILES_FILE`). `consult` and `implement` default to `gpt-6.2-sol`. The other modes default to `gpt-6.2-astra`, subject to prior model inheritance on resume.
+
+* `verbosity_by_mode` selects `low` for `implement` and `medium` for other modes. Use `--verbosity low|medium|high|inherit` to override it. An explicit Codex `--profile` defaults to `inherit`. Unsupported models warn and fall back to `inherit`. User `-c model_verbosity=...` is applied after the routed setting. Older profile files without the new routing keys continue to load with inherited verbosity and automatic stdout.
+* Exec prompts append `OUTPUT_CLARITY_FOOTER` after the other prompt conditioning. Use `--no-clarity-footer` to opt out. Native review has no injected prompt. Single and parallel runners accept both controls, including per-task manifest overrides in parallel. The worker summary records resolved `verbosity` and the `clarity_footer` setting.
+* `review --structured` selects the strict `review-output-schema.json` in read-only exec. The receipt records verdict, findings with P0–P3 severity, verification, and unverified areas. All five bundled schemas describe how to supply complete sentences, exact anchors, and explicit gaps.
 
 ## 4. Private-Index Patch Custody & Ownership Table (`parallel_runner.py`)
 
@@ -54,7 +58,9 @@ Model defaults, effort defaults, speed tier capabilities (`supports_ultrafast`, 
 ## 6. Security, Stdout Hygiene & Native Composition
 
 * **Credential Isolation**: `codex_orch.env.build_child_env` strips host SSH/cloud/platform tokens while preserving Codex auth and runtime essentials; `ensure_private_dir` rejects symlinks and verifies POSIX owner + `0700` mode; secrets are redacted from diagnostics.
-* **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` compacts `last_message.md > 4096` bytes into a UTF-8-safe preview with file pointers.
+* **Bounded Stdout (`--stdout-mode auto|compact|facts|full`)**: `stdout_mode_by_mode` selects `facts` for `implement` and `auto` otherwise. Parallel workers resolve their own defaults when no override is supplied. `auto` compacts responses larger than 4096 bytes. `facts` previews expose verdict tokens, collection counts, severity and check rollups, and file pointers within the UTF-8 byte budget. Non-JSON responses yield only a format marker and file pointers.
+* **Objective host evidence and commentary quarantine**: The wrapper prints the changed-file count, a bounded path list, patch path and size, and host verification status and artifact path before the last-message preview when those artifacts exist. `partial_progress.last_agent_messages` remains in the failure `summary.json` on disk and is omitted from stdout in every mode. In `facts` mode, raw failure diagnostics remain available through the event and stderr artifacts.
+* **Communication Charter v3.2**: Inspect `git diff --stat`, key hunks and host `verification.json` against every Spec acceptance item before consulting implementation prose. Flag missing proof and spot-check cited anchors for read-only work. The Synthesis Firewall preserves hard evidence and turns internal working language into self-contained Chinese.
 * **Loose Antigravity Composition**: Use native `/swarm` (`land-before-kill`) + `/review` for interactive collaborative coding with external Codex final audit; use reusable read-only `/run-workflow` templates (`workflows/research_parallel.py`, `workflows/debate_multi_critic.py`) for card-based multi-slice research/critique.
 
 ## 7. Context Telemetry, Native Handoff Hook & Session Handoff (`context_telemetry.py`, `context_hook.py`, `handoff.py`)

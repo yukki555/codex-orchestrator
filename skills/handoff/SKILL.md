@@ -19,7 +19,7 @@ Execute strictly in order:
    * Run `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts/handoff.sh inspect` to read `active_tokens`, `context_limit`, `band`, `checkpoint_count`, `active_model`, `tool_activity`, and `effective_mode`.
    * If you only need lightweight noise trimming inside the same UI tab (and are not running an unattended multi-phase pipeline or experiencing checkpoint fatigue), inform the user that native `/compact` is also an option.
 3. **Author Verified 9-Section Handoff Packet**:
-   * Follow `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/handoff-packet-template.md` and write a concise, high-signal packet (`1.5K–3.5K` tokens, `400 B – 24 KB`) to `<artifactDirectoryPath>/handoff/draft-handoff.md` (or `/tmp/codex-orchestrator/handoff-draft.md`).
+   * Follow `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/handoff-packet-template.md` and write a self-contained packet (`1.5K–3.5K` tokens, `400 B – 24 KB`) to `<artifactDirectoryPath>/handoff/draft-handoff.md` (or `/tmp/codex-orchestrator/handoff-draft.md`).
    * Include all 8 human/model-authored sections (`## 1.` .. `## 8.`), remove all `<!-- ... -->` template comments, cite only existing file paths in Sections 6–7, and never embed credentials or CSRF tokens.
    * Specify the main action in Section 2 and include an optional parallel subagent track when a short `remote-runner` or built-in `research` wave can start on the successor's first turn.
 4. **Execute Handoff (`handoff.sh create`)**:
@@ -37,4 +37,6 @@ Execute strictly in order:
    * If `handoff.sh` returns exit `7` (`ls_api_unreachable` / sandbox-blocked), keep the persisted packet intact and present the fallback prompt path clearly to the user.
 5. **Terminal-Action Receipt (Zero Subsequent Edits)**:
    * Immediately after `handoff.sh create` exits `0`, execute **ZERO further workspace edits or mutating commands** (prevents split-brain races with the newly started successor).
-   * Reply concisely in natural Chinese following Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`: provide the clickable successor link `[新会话标题](conversation://<new_conversation_id>)`, clickable Handoff Packet file link, context/model telemetry (`active_tokens / context_limit`, `model_used`, `hop_index / max_hops`), and the exact next atomic action the successor is resuming.
+   * Reply in self-contained natural Chinese following Communication Charter v3.2 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`: provide the clickable successor link `[新会话标题](conversation://<new_conversation_id>)`, clickable Handoff Packet file link, context/model telemetry (`active_tokens / context_limit`, `model_used`, `hop_index / max_hops`), and the exact next atomic action the successor is resuming.
+
+Apply the Charter’s Synthesis Firewall. Preserve exact evidence anchors and measured values, rewrite working shorthand and internal codes as self-contained Chinese, and disclose gaps. Routine `consult` defaults to `gpt-6.2-sol`. Deep `research`, `critique`, and `analyze` default to `gpt-6.2-astra`.

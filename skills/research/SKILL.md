@@ -25,4 +25,6 @@ Execute strictly in order:
 4. **Stage 3 — Source Spot-Check & Chinese Decision Brief**:
    * Verify `status == "ok"` and `structured_valid: true` in `summary.json` / `parallel-summary.json`.
    * Spot-check at least `2–3` core `claims` against their cited `source_ids` / `quote_or_location` directly via `read_file` (or source URL).
-   * Rewrite into a decision-ready Chinese brief following the **deep research / red-team / analysis route** of the Communication Charter v3.1 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`. Never paste raw Codex JSON/prose.
+   * Rewrite into a decision-ready Chinese brief following the **deep research / red-team / analysis route** of the Communication Charter v3.2 in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`. Never paste raw Codex JSON/prose.
+
+Apply the Charter’s Synthesis Firewall. Preserve exact evidence anchors and measured values, rewrite working shorthand and internal codes as self-contained Chinese, and disclose gaps. Routine `consult` defaults to `gpt-6.2-sol`. Deep `research`, `critique`, and `analyze` default to `gpt-6.2-astra`.

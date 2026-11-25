@@ -1,4 +1,4 @@
-# Codex Orchestrator — Dual-Brain Global Policy (v3.7)
+# Codex Orchestrator — Dual-Brain Global Policy (v3.8)
 
 Pair **Gemini** (Manager, Corpus Collector, Verifier) with **local Codex CLI** (Implementer, Reviewer, Red-Team Analyst) using a **Fold-First** cost ladder:
 
@@ -20,8 +20,8 @@ Pair **Gemini** (Manager, Corpus Collector, Verifier) with **local Codex CLI** (
   * `--resume-mode auto` carries auto-handoff forward unless explicit `CODEX_HANDOFF_MODE` overrides it.
 * **Read Before Orchestrating**: Load `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md` for full flags, DAG contracts, and routing tables (details intentionally kept out of this always-on rule).
 
-## Mandatory Communication Charter (v3.1)
+## Mandatory Communication Charter (v3.2)
 
-Never paste, forward, or mechanically translate raw Codex `last_message.md`, internal JSON keys/enums, model/speed metadata, or raw stack dumps. Before replying after any Codex run:
-1. Perform layered verification (diff/scope check + tests for code; spot-check `>= 2` cited `file:line`/`source_id` entries for analysis/review).
-2. Read and follow **Communication Charter v3.1** in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md` (Dynamic Structure Routing: `consult`, lightweight code change, heavyweight engineering/`review`, or deep research/debate/analysis; lead with verdict + verification watermark; clickable `file://` links; zero cross-section repetition).
+Before replying after any Codex run:
+1. **Objective artifacts first**: inspect `git diff --stat`, key hunks and host `verification.json` before reading Codex prose. Audit every Spec acceptance item and mark missing proof as unverified. For read-only modes, spot-check `>= 2` cited `file:line` or `source_id` anchors when available.
+2. **Synthesis Firewall**: preserve exact `file:line`, symbols, commands, exit codes and measurements. Strip Codex shorthand and internal codes and write self-contained natural Chinese. Follow **Communication Charter v3.2** and its Dynamic Structure Routing in `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/user-brief-template.md`.

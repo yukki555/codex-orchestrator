@@ -8,7 +8,7 @@ description: >-
   Proof-of-Work, opt-in --tdd, chain auto-handoff, and /swarm and /run-workflow composition.
 ---
 
-# Codex Orchestrator (v3.7)
+# Codex Orchestrator (v3.8)
 
 Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity built around a decoupled **Brain (`rules/`, `skills/`, `workflows/`) / Session (`SPEC.md` + immutable `attempts/attempt-NNN/` + `handoff/` packets) / Hands (`codex_orch/` Python kernel + `config/profiles.json` + thin `.sh` shims)** architecture.
 
@@ -35,7 +35,8 @@ Before spawning workers, apply the Fold-First ladder (multi-agent fan-out can co
 
 ## Declarative Profiles, Proof-of-Work & Opt-In Independent TDD
 
-* **Declarative Profiles ([`config/profiles.json`](./config/profiles.json))**: Externalizes mode model/effort/speed defaults, `gpt-6.2-sol` (`ultrafast`) vs `gpt-6.2-astra` (`fast`) capability rules, `max_cmds` defaults, and bundled schema filenames (override with `--profiles-file <PATH>` or `CODEX_ORCH_PROFILES_FILE`).
+* **Declarative Profiles ([`config/profiles.json`](./config/profiles.json))**: `consult` and `implement` default to `gpt-6.2-sol`. `review`, `resume`, `research`, `critique`, and `analyze` default to `gpt-6.2-astra` (resume can inherit its prior model). `verbosity_by_mode` sets `low` for `implement` and `medium` elsewhere, with explicit `--verbosity` and profile inheritance supported. Override routing with `--profiles-file` or `CODEX_ORCH_PROFILES_FILE`.
+* **Dispatch and Receipts**: `OUTPUT_CLARITY_FOOTER` asks exec workers for self-contained prose, exact anchors, and explicit verification gaps. Use `--no-clarity-footer` to omit it. `review --structured` uses `review-output-schema.json` with P0–P3 findings and unverified areas.
 * **Trusted Repo Contract (`.codex-orchestrator.json`)**: Optional JSON file read strictly from pre-run `base_oid` (`git show <base_oid>:.codex-orchestrator.json`) or `--contract <FILE>` (never from the candidate tree modified by Codex; rejects arbitrary `before_run` shell hooks). Supports `allowed_paths`, `protected_paths`, `dirty_policy`, `max_timeout_s`, and `verify_commands` (argv lists run with `shell=False` under stripped `build_child_env()`).
 * **Host-Side Proof-of-Work (`--verify-cmd` / `--verify-preset` / `--allowed-path` / `--protected-path`)**: Enforces hard path policies (exit `5` on violation) and runs host verification on a reconstructed clean worktree to emit `verification.json` (exit `6` on failure), strictly separate from Codex self-reported `verification[]`.
 * **Opt-In Cross-Model Independent TDD (`--tdd`)**: Best for bug fixes and algorithmic contracts:
@@ -49,7 +50,7 @@ Before spawning workers, apply the Fold-First ladder (multi-agent fan-out can co
 See [`SPEC.md`](../../../SPEC.md) for the complete exit-code table (`0` ok, `2` preflight/self-hosting/unsupported schema/invalid contract, `3` schema_error, `4` tdd_red_failed, `5` protected_path/scope violation, `6` verification_failed, `75` paused_quota on non-zero child exit, `124` timeout, `125` stall_timeout, `128+sig` cancelled).
 
 * **Immutable Attempt History**: Every run records immutable files under `<out-dir>/attempts/attempt-NNN/` and atomically publishes top-level `summary.json` last (`resume` discovery ignores `attempts/*/`).
-* **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` compacts `last_message.md > 4096` bytes into a UTF-8-safe preview with file pointers. Always `read_file` `last_message.md` / `summary.json` / `verification.json` when inspecting full details.
+* **Bounded Stdout (`--stdout-mode auto|compact|facts|full`)**: `implement` defaults to `facts` for structural counts, severity and verification rollups, and artifact pointers. `auto` compacts responses larger than 4096 bytes. Mid-flight agent messages are available in the failure summary on disk.
 * **Self-Hosting Safety**: Both `.sh` shims invoke `exec python3 -I -B` and refuse in-place `implement` targeting `scripts/` without `--worktree`.
 
 ## Context Telemetry & Native Session Handoff (`/handoff`, `v3.7`)
@@ -60,11 +61,11 @@ See [`SPEC.md`](../../../SPEC.md) for the complete exit-code table (`0` ok, `2` 
 * **Noise nudges** use the same transcript scan and fire at most once per checkpoint epoch for each type. Configure thresholds in `context_handoff.noise_nudge` and toggle them with `CODEX_NOISE_NUDGE`. They remain available with `CODEX_HANDOFF_MODE=off`.
 * **Chain inheritance** follows explicit `CODEX_HANDOFF_MODE`, then the successor's `handoff-mode:auto|propose` tag, then the profile default. `--resume-mode auto` tags and pre-seeds the successor, which can start the packet's optional parallel subagent track on its first turn. `inspect` reports `effective_mode` and `tool_activity`.
 
-## Layered Verification & Communication Charter (`v3.1`)
+## Layered Verification & Communication Charter (`v3.2`)
 
 Before replying after any Codex run:
-1. Inspect `summary.json` / `parallel-summary.json` / `verification.json` and `git diff`; for read-only modes, spot-check `>= 2` cited `file:line` or `source_id` entries directly.
-2. Rewrite from scratch in calm, precise natural Chinese following [user-brief-template.md](./references/user-brief-template.md) (Communication Charter v3.1). Never paste raw Codex `last_message.md` or internal metadata.
+1. Before consulting Codex prose for code changes, inspect `git diff --stat` and key hunks, host `verification.json` when available, and each Spec `Done When` item. Identify acceptance items that lack diff or test proof. For read-only modes, spot-check at least two cited `file:line` or `source_id` anchors when available.
+2. Apply the Synthesis Firewall in [user-brief-template.md](./references/user-brief-template.md) (Communication Charter v3.2). Preserve exact paths, lines, symbols, real commands and exit codes. Strip working shorthand and internal codes, then write self-contained natural Chinese.
 
 ## Invocation Examples
 

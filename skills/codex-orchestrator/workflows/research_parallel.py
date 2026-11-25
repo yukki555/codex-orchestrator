@@ -63,11 +63,18 @@ async def main():
         return (
             f"Create the artifact directory {worker_dir!r} and save this brief at {spec_path!r}:\n"
             f"{spec}\n\n"
+            "## Output Clarity Contract\n"
+            "Write complete, self-contained sentences with exact evidence anchors. Omit internal "
+            "shorthand, step codes, and telegraphic fragments. Disclose gaps, skipped checks, "
+            "unverified assumptions, and blockers.\n\n"
             "Use the installed codex-orchestrator scripts/run_codex.sh for this command:\n"
             f"{command}\n"
             "Keep the corpus read-only and write only to the assigned artifact directory. "
             "Return the wrapper status from summary.json and the requested evidence from its "
-            "structured last message. If the wrapper fails, summarize the diagnostics."
+            "structured last message."
+            " Normalize findings into complete sentences without carrying over Codex shorthand. "
+            "Preserve exact anchors, include artifact pointers, and state gaps. "
+            "Summarize diagnostics if the wrapper fails."
         )
 
     async def research_slice(item):

@@ -1,8 +1,8 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.7): horizontal denoising via remote-runner and built-in research, zero-extra-process PreInvocation noise nudges, chain-inherited auto-handoff, and a pure-Python kernel with declarative profiles, verified patch custody, Proof-of-Work, and opt-in cross-model TDD.",
-  "version": "3.7.0",
+  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.8) with declarative verbosity, structured review receipts, facts-only implementation previews, and objective-first verification. Includes verified patch custody, opt-in cross-model TDD, and native session handoff.",
+  "version": "3.8.0",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [

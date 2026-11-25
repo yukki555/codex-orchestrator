@@ -49,6 +49,10 @@ DEFAULT_CONTEXT_HANDOFF: dict = {
         {"pattern": ".*", "tier": "flash"},
     ],
 }
+VERBOSITIES = ("low", "medium", "high", "inherit")
+STDOUT_MODES = ("auto", "compact", "facts", "full")
+
+
 _HANDOFF_MODES = ("propose", "auto", "off")
 _MODEL_TIERS = ("pro", "flash", "flash_lite")
 
@@ -128,6 +132,26 @@ def _validate_profiles(profiles: dict) -> None:
     if defaults["effort"] not in efforts:
         raise ValueError("invalid default effort")
 
+    for key, supported in (("valid_verbosities", VERBOSITIES), ("valid_stdout_modes", STDOUT_MODES)):
+        if key in profiles:
+            values = profiles[key]
+            if (not isinstance(values, list) or not values
+                    or any(value not in supported for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError(f"{key} must list distinct supported values")
+
+    for key, allowed_keys, required_keys, values in (
+        ("verbosity_by_mode", modes, modes, profiles.get("valid_verbosities", VERBOSITIES)),
+        ("stdout_mode_by_mode", modes | {"default"}, {"default"},
+         profiles.get("valid_stdout_modes", STDOUT_MODES)),
+    ):
+        if key in defaults:
+            mapping = defaults[key]
+            if (not isinstance(mapping, dict) or not required_keys.issubset(mapping)
+                    or not mapping.keys() <= allowed_keys
+                    or any(value not in values for value in mapping.values())):
+                raise ValueError(f"invalid defaults.{key}")
+
     models_by_mode = defaults["model_by_mode"]
     budgets = defaults["max_cmds_by_mode"]
     schemas = defaults["schema_by_mode"]
@@ -154,6 +178,8 @@ def _validate_profiles(profiles: dict) -> None:
     for capability in (*models.values(), profiles["fallback_model_capabilities"]):
         if not isinstance(capability, dict) or type(capability.get("supports_ultrafast")) is not bool:
             raise ValueError("model capabilities must declare boolean supports_ultrafast")
+        if "supports_verbosity" in capability and type(capability["supports_verbosity"]) is not bool:
+            raise ValueError("model capabilities must declare boolean supports_verbosity")
         if any(capability.get(key) not in speeds for key in ("low_medium_speed", "high_speed")):
             raise ValueError("invalid model routing speed")
         if not capability["supports_ultrafast"] or "downgrade_ultrafast_to" in capability:
@@ -272,6 +298,27 @@ def resolve_execution_profile(
         speed = capabilities["downgrade_ultrafast_to"]
         warnings.append(f"warning: {model} does not support ultrafast; downgrading speed to {speed}")
     return model, effort, speed, warnings
+
+
+def resolve_verbosity(
+    profiles: dict, *, mode: str, model: str, verbosity: str | None = None,
+    profile_name: str | None = None,
+) -> tuple[str, list[str]]:
+    if verbosity is not None and verbosity not in profiles.get("valid_verbosities", VERBOSITIES):
+        raise ValueError(f"invalid --verbosity: {verbosity!r}")
+    if verbosity is None:
+        defaults = profiles.get("defaults", {}).get("verbosity_by_mode", {})
+        verbosity = "inherit" if profile_name else defaults.get(mode, "inherit")
+
+    capabilities = profiles["models"].get(model, profiles["fallback_model_capabilities"])
+    if verbosity != "inherit" and not capabilities.get("supports_verbosity", True):
+        return "inherit", [f"warning: {model} does not support model verbosity; inheriting verbosity"]
+    return verbosity, []
+
+
+def default_stdout_mode(profiles: dict, *, mode: str) -> str:
+    mapping = profiles.get("defaults", {}).get("stdout_mode_by_mode", {})
+    return mapping.get(mode, mapping.get("default", "auto"))
 
 
 def default_max_cmds(profiles: dict, *, mode: str, review_engine: str = "") -> int:

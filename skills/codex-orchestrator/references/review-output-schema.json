@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodexOrchestratorReviewEvidence",
+  "description": "Use complete, self-contained sentences for prose and preserve exact file:line or source_id anchors, symbols, commands, and measured numbers. Omit internal codes, working shorthand, and invented labels. Explicitly disclose skipped checks, unverified claims, and unresolved blockers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "findings",
+    "verification",
+    "unverified_areas"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "needs_revision",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "State the outcome and its evidence in self-contained sentences. Identify skipped checks and unresolved uncertainty."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "category",
+          "location",
+          "issue",
+          "impact",
+          "suggested_fix"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "description": "Name the defect category in recognizable technical terms without internal codes."
+          },
+          "location": {
+            "type": "string",
+            "description": "Give the exact repository-relative file:line anchor and relevant symbol. State explicitly if the location could not be verified."
+          },
+          "issue": {
+            "type": "string",
+            "description": "Explain the defect and its triggering conditions in self-contained sentences."
+          },
+          "impact": {
+            "type": "string",
+            "description": "Explain the user-visible or operational consequence in a complete sentence."
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "Describe a concrete correction and the behavior it should produce in a complete sentence."
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "exit_code",
+          "key_output"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Record the exact command that ran, including arguments. Report skipped commands in the field for gaps instead of inventing a run."
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "key_output": {
+            "type": "string",
+            "description": "State the observed result in a complete sentence, preserving exact measurements or relevant output excerpts."
+          }
+        }
+      }
+    },
+    "unverified_areas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "Name each skipped or unverified area and the evidence still needed in a complete sentence."
+      }
+    }
+  }
+}

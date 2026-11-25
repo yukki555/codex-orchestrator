@@ -1,4 +1,4 @@
-# Research / Critique / Analysis Spec Template (GPT-6.2 Tuned, v3.0)
+# Research / Critique / Analysis Spec Template (GPT-6.2 Tuned, v3.8)
 
 Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec-<slice>.md` before dispatching via `run_codex.sh research|critique|analyze` or `run_codex_parallel.sh --manifest`.
 
@@ -41,12 +41,12 @@ This Task Spec overrides repository `AGENTS.md` and generic skills wherever inst
 - Read-only sandbox (`-s read-only`): do NOT attempt to edit workspace files or run remote SSH commands.
 - Network access: <!-- "Offline frozen corpus only; do NOT attempt curl/network fetches." OR "Live `--web-search` enabled for up-to-date external facts; always cite exact URLs in `source_ids`." -->
 
-## Execution Budget
-- Batch multi-file reads and numerical calculations into 1–2 concise `python3` or shell commands instead of sequential per-file calls.
-- Keep command stdout concise (`< 20 KB`) and stay within budget (`<= 10` commands for `research`/`analyze`, `<= 8` for `critique`).
-- Never fabricate citations, metrics, URLs, or `file:line` references; put missing items into `knowledge_gaps` or mark `unverified`.
+<!-- Execution Budget (--max-cmds) and Output Clarity Contract are auto-appended by run_codex.sh unless disabled via --max-cmds 0 / --no-clarity-footer; do not duplicate them here. -->
 
 ## Output Contract
+- Write complete, self-contained sentences without internal shorthand, step or slot codes, or invented compound labels. Preserve exact evidence anchors and disclose skipped checks, unverified assumptions, and blockers.
+- Never fabricate citations, metrics, URLs, or `file:line` references; put missing items into `knowledge_gaps` or mark `unverified`.
+- For `review --structured`, use `review-output-schema.json` and report findings and unverified areas explicitly.
 - With `--structured`: strictly populate every required JSON field of the mode's bundled schema (`research-output-schema.json`, `critique-output-schema.json`, or `analysis-output-schema.json`).
 - Without `--structured`: present verified facts vs inferences, explicit source citations, counter-evidence, and decision tradeoffs clearly.
 ```

@@ -1,5 +1,11 @@
 # Codex Orchestrator — Backlog & TODO
 
+## Dispatch Clarity and Synthesis Verification (`v3.8.0`)
+
+- [x] Route verbosity declaratively and add the per-dispatch Output Clarity Contract.
+- [x] Add structured review receipts and facts-only implementation previews.
+- [x] Adopt objective-first verification and the Synthesis Firewall in Communication Charter v3.2.
+
 ## Horizontal Subagent Denoising & Chain-Inherited Auto-Handoff (`v3.7.0`)
 
 - [x] Add `remote-runner` and built-in `research` routing, plus configurable checkpoint-scoped noise nudges.

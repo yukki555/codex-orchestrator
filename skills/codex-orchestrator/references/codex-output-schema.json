@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CodexOrchestratorEvidence",
+  "description": "Use complete, self-contained sentences for prose and preserve exact file:line or source_id anchors, symbols, commands, and measured numbers. Omit internal codes, working shorthand, and invented labels. Explicitly disclose skipped checks, unverified claims, and unresolved blockers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,12 +24,14 @@
       ]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "description": "State the outcome and its evidence in self-contained sentences. Identify skipped checks and unresolved uncertainty."
     },
     "root_cause_or_design": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Explain the root cause or design decision in a complete sentence with its relevant conditions."
       }
     },
     "changes": {
@@ -44,16 +47,20 @@
         ],
         "properties": {
           "file": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the exact repository-relative file path. Use the real path in place of any internal label."
           },
           "symbol": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the exact code symbol as written in the repository, including its qualifier when needed."
           },
           "what_changed": {
-            "type": "string"
+            "type": "string",
+            "description": "Describe the behavior that changed in a complete sentence."
           },
           "why": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain why the change was necessary and which requirement it addresses in a complete sentence."
           }
         }
       }
@@ -70,13 +77,16 @@
         ],
         "properties": {
           "claim": {
-            "type": "string"
+            "type": "string",
+            "description": "State the evidence-backed claim in a complete sentence that stands on its own."
           },
           "location": {
-            "type": "string"
+            "type": "string",
+            "description": "Give the exact repository-relative file:line anchor and relevant symbol. State explicitly if the location could not be verified."
           },
           "detail": {
-            "type": "string"
+            "type": "string",
+            "description": "Explain in complete sentences what the cited evidence establishes and where its scope ends."
           }
         }
       }
@@ -93,13 +103,15 @@
         ],
         "properties": {
           "command": {
-            "type": "string"
+            "type": "string",
+            "description": "Record the exact command that ran, including arguments. Report skipped commands in the field for gaps instead of inventing a run."
           },
           "exit_code": {
             "type": "integer"
           },
           "key_output": {
-            "type": "string"
+            "type": "string",
+            "description": "State the observed result in a complete sentence, preserving exact measurements or relevant output excerpts."
           }
         }
       }
@@ -107,7 +119,8 @@
     "risks_and_decisions": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "description": "Describe each decision, unresolved risk, skipped check, or unverified assumption in a self-contained sentence."
       }
     }
   }

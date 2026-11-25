@@ -55,11 +55,18 @@ async def main():
                 f"the {perspective!r} perspective. Inspect supporting evidence in the target directory. "
                 "Give each challenge a severity, target claim, counterargument, precise evidence "
                 "location, and suggested fix. Use P0 for blockers and P1 for major issues.\n\n"
+                "## Output Clarity Contract\n"
+                "Write complete, self-contained sentences with exact evidence anchors. Omit internal "
+                "shorthand, step codes, and telegraphic fragments. Disclose gaps, skipped checks, "
+                "unverified assumptions, and blockers.\n\n"
                 "Use the installed codex-orchestrator scripts/run_codex.sh for this command:\n"
                 f"{command}\n"
                 "Keep the proposal and target read-only and write only to the assigned artifact "
                 "directory. Return the wrapper status from summary.json and the requested evidence "
-                "from its structured last message. If the wrapper fails, summarize the diagnostics."
+                "from its structured last message."
+                " Normalize findings into complete sentences without carrying over Codex shorthand. "
+                "Preserve exact anchors, include artifact pointers, and state gaps. "
+                "Summarize diagnostics if the wrapper fails."
             ),
             schema=CRITIC_SCHEMA,
             role=f"Critic {perspective}",
