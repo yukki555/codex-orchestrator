@@ -1,5 +1,5 @@
 {
-  "version": "3.6.0",
+  "version": "3.7.0",
   "valid_modes": ["consult", "implement", "review", "resume", "research", "critique", "analyze"],
   "valid_efforts": ["low", "medium", "high", "xhigh", "max", "ultra", "inherit"],
   "valid_speeds": ["default", "fast", "ultrafast", "inherit"],
@@ -52,6 +52,13 @@
   },
   "context_handoff": {
     "default_mode": "propose",
+    "noise_nudge": {
+      "enabled": true,
+      "remote_cmd_threshold": 4,
+      "remote_streak_threshold": 3,
+      "read_file_threshold": 12,
+      "read_file_min_tokens": 80000
+    },
     "soft_ratio": 0.45,
     "soft_cap_tokens": 200000,
     "hard_ratio": 0.65,

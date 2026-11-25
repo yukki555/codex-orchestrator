@@ -2,12 +2,13 @@
 name: codex-orchestrator
 description: >-
   Orchestrate local OpenAI Codex CLI (codex exec) via pure-Python codex_orch kernel
-  (run_codex.sh / run_codex_parallel.sh, or codex-worker for multi-round repairs & SSH/GPU
-  isolation) with declarative profiles, patch custody, host-side Proof-of-Work, opt-in --tdd,
-  and loose composition with /swarm and /run-workflow.
+  (run_codex.sh / run_codex_parallel.sh, or codex-worker for multi-round repairs and
+  local log isolation). Route remote waves to remote-runner and broad reads to
+  built-in research. Includes declarative profiles, verified patch custody, host-side
+  Proof-of-Work, opt-in --tdd, chain auto-handoff, and /swarm and /run-workflow composition.
 ---
 
-# Codex Orchestrator (v3.6)
+# Codex Orchestrator (v3.7)
 
 Operate a **General-Purpose Manager + High-Execution Specialist** workflow in Google Antigravity built around a decoupled **Brain (`rules/`, `skills/`, `workflows/`) / Session (`SPEC.md` + immutable `attempts/attempt-NNN/` + `handoff/` packets) / Hands (`codex_orch/` Python kernel + `config/profiles.json` + thin `.sh` shims)** architecture.
 
@@ -18,7 +19,9 @@ Before spawning workers, apply the Fold-First ladder (multi-agent fan-out can co
 1. **Tier 0 (Main Loop + Skills)**: Single-fact lookups, docs/config edits, or small fixes within the active Guard limit (`<= 10` lines under default `strict`, or `<= 30` lines on an existing code file when `CODEX_GUARD_PROFILE=pragmatic`).
 2. **Tier 1 (Direct 1-Hop `run_codex.sh` — Default)**: Clean single-pass `implement`, `consult`, `review --structured`, `research`, `critique`, or `analyze` via `run_command`.
 3. **Tier 2 (Isolator, Parallel DAG, or Native Composition — Only When Justified)**:
-   * **`codex-worker` subagent (`inheritMcp: false`)**: Only when isolating multi-round repair loops (`<= 2` rounds), remote SSH/GPU checks, or noisy build/test logs.
+   * **`remote-runner` subagent (prefer `Model="flash"`)** handles cross-host sync, job Launch-Verify-Return, and remote probing/polling expected to take `>= 2` turns. Keep single read-only probes in the main loop.
+   * **Built-in `research` subagent** handles broad read-only exploration across `>= 5` unfamiliar local files or log directories.
+   * **`codex-worker` subagent (`inheritMcp: false`)** isolates multi-round Codex repair loops (`<= 2` rounds), noisy local build/test logs, and read-only `/run-workflow` slices.
    * **Parallel `/dag` (`run_codex_parallel.sh`)**: `>= 3` loosely coupled code files (`> 200` lines), with automatic public Ownership Table injection, private-index patch custody, and optional combined host-side Proof-of-Work.
    * **Native Antigravity Composition**:
      * **`/swarm` -> `/review` (Interactive Multi-Agent Coding + Cross-Model Final Audit)**: When parallel tasks require real-time mid-flight negotiation, run native `/swarm` (`land-before-kill`) and then invoke `/review` (`run_codex.sh review --uncommitted --structured` or `--base`) on the exact landed baseline for an independent cross-model audit.
@@ -49,11 +52,13 @@ See [`SPEC.md`](../../../SPEC.md) for the complete exit-code table (`0` ok, `2` 
 * **Bounded Stdout (`--stdout-mode auto|compact|full`)**: Default `auto` compacts `last_message.md > 4096` bytes into a UTF-8-safe preview with file pointers. Always `read_file` `last_message.md` / `summary.json` / `verification.json` when inspecting full details.
 * **Self-Hosting Safety**: Both `.sh` shims invoke `exec python3 -I -B` and refuse in-place `implement` targeting `scripts/` without `--worktree`.
 
-## Context Telemetry & Native Session Handoff (`/handoff`, `v3.6`)
+## Context Telemetry & Native Session Handoff (`/handoff`, `v3.7`)
 
 * **Dual-Constraint Performance Thresholds (`config/profiles.json` `context_handoff`)**: Resolves Antigravity platform truncation limits (`cpLimit`: Gemini 4 / Orchestrator `512K`, Claude 5.5 / Gemini 3.8 `256K`, Claude 4.6 `160K`, Gemini 3.1 Pro `128K`, GPT-OSS `80K`; Orchestrator dual-model threads take the conservative minimum) and computes `Soft = min(200K, 45% × cpLimit)`, `Hard = min(300K, 65% × cpLimit)`, and `Emergency = 80% × cpLimit` (overridable via `CODEX_HANDOFF_*` env vars).
-* **Native Lifecycle Hook (`codex-context-handoff` in `hooks.json`)**: Fail-open `PreInvocation` + `Stop` guard (`hook_context_guard.py`, `timeout: 5s`) shares `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/codex-orchestrator/handoff_state` with `handoff.sh`, skips child subagents, resets on `/compact` (`checkpoint_epoch`), fires each band at most once per epoch (omitting `systemMessage.metadata` by default to avoid Antigravity `v2.35.1`'s `ScrubInternalFields` map panic; opt in via `CODEX_HANDOFF_HOOK_METADATA=1`), guards against post-handoff split-brain edits, and supports `CODEX_HANDOFF_MODE=propose|auto|off` (`propose` default; `Stop` nudge active only in `auto` mode with `fullyIdle == true` and `continuationActive == false`).
+* **Native Lifecycle Hook (`codex-context-handoff` in `hooks.json`)**: Fail-open `PreInvocation` + `Stop` guard (`hook_context_guard.py`, `timeout: 5s`) shares `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/codex-orchestrator/handoff_state` with `handoff.sh`, skips child subagents, resets on `/compact` (`checkpoint_epoch`), fires each band at most once per epoch (omitting `systemMessage.metadata` by default to avoid Antigravity `v2.35.1`'s `ScrubInternalFields` map panic; opt in via `CODEX_HANDOFF_HOOK_METADATA=1`), guards against post-handoff split-brain edits, and supports `CODEX_HANDOFF_MODE=propose|auto|off` (`Stop` nudge active only in effective `auto` mode with `fullyIdle == true` and `continuationActive == false`).
 * **Lossless Handoff CLI (`scripts/handoff.sh`)**: `inspect` reads live transcript telemetry; `validate` & `create` enforce the 8-section Handoff Packet contract (`references/handoff-packet-template.md`), verify referenced paths & Git conflict-free status, redact/block secrets, append deterministic `## 9. Deterministic Runtime Snapshot`, preserve `projectId` / `environmentId` / `conversationGroupId` / active model (with tier fallback), enforce `max_hops` and per-epoch idempotency, and fall back cleanly with exit `7` (`ls_api_unreachable`) if local LS RPC is sandbox-blocked.
+* **Noise nudges** use the same transcript scan and fire at most once per checkpoint epoch for each type. Configure thresholds in `context_handoff.noise_nudge` and toggle them with `CODEX_NOISE_NUDGE`. They remain available with `CODEX_HANDOFF_MODE=off`.
+* **Chain inheritance** follows explicit `CODEX_HANDOFF_MODE`, then the successor's `handoff-mode:auto|propose` tag, then the profile default. `--resume-mode auto` tags and pre-seeds the successor, which can start the packet's optional parallel subagent track on its first turn. `inspect` reports `effective_mode` and `tool_activity`.
 
 ## Layered Verification & Communication Charter (`v3.1`)
 

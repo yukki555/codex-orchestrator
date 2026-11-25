@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .context_telemetry import (
     ContextAssessment,
+    TranscriptTelemetry,
     chain_position_from_tags,
     evaluate_context_band,
     hash_user_input,
@@ -27,10 +28,15 @@ SKIP_HANDOFF_RE = re.compile(
     r"skip\s+handoff|no\s+handoff|disable\s+handoff",
     re.IGNORECASE,
 )
+SKIP_NOISE_NUDGE_RE = re.compile(
+    r"不用子代理|别用子代理|不要子代理|主循环直跑|关闭降噪提醒|"
+    r"skip\s+noise\s+nudge|no\s+noise\s+nudge|disable\s+noise\s+nudge|no\s+subagent",
+    re.IGNORECASE,
+)
 BANDS = ("soft", "hard", "emergency")
 AUTO_HANDOFF = (
     "Prepare a handoff packet with the current task, progress, and next steps. "
-    "Run the plugin's `handoff.sh create --packet <packet>` with the current workspace. "
+    "Run the plugin's `handoff.sh create --packet <packet> --resume-mode auto` with the current workspace. "
     "Once handoff succeeds, output the handoff receipt and end this turn."
 )
 
@@ -99,27 +105,49 @@ def _inject(message: str, *, hook_metadata: bool, **metadata: str) -> dict:
     return {"injectSteps": [{"systemMessage": system_message}]}
 
 
-def _band_notice(assessment: ContextAssessment, band: str, mode: str, *, hook_metadata: bool) -> dict:
+def _band_notice(
+    assessment: ContextAssessment, band: str, mode: str, *, can_handoff: bool, hook_metadata: bool
+) -> dict:
     if band == "checkpoint_fatigue":
-        message = "Recommend a clean `/handoff` now. Repeated in-place compactions have occurred."
-        tip = "已多次压缩，建议用 /handoff 接力"
+        if can_handoff:
+            message = "Recommend a clean `/handoff` now. Repeated in-place compactions have occurred."
+            tip = "已多次压缩，建议用 /handoff 接力"
+        else:
+            message = (
+                "Repeated in-place compactions have occurred and this session has reached max_hops. "
+                "Ask the user whether to continue with `/compact` or explicitly raise `--max-hops`."
+            )
+            tip = "已多次压缩且已达接力跳数上限，请询问用户是否继续用 /compact 或提高 --max-hops"
     elif band == "soft":
-        message = (
-            "Context pressure is rising. Finish the current step and keep the next action clear. "
-            "Mention `/handoff` for a fresh session or `/compact` to stay in this session."
-        )
-        if mode == "auto":
+        tip = "可用 /handoff 接力或 /compact 压缩"
+        if not can_handoff:
+            message = (
+                "Context pressure is rising. Finish the current step and keep the next action clear. "
+                "This session has reached max_hops. Offer `/compact` to stay in this session."
+            )
+            tip = "已达接力跳数上限，可用 /compact 压缩"
+        elif mode == "auto":
             message = (
                 "Context pressure is rising. Finish the current step and note the state needed for "
                 "an automatic handoff if pressure increases. The user can use `/handoff` now."
             )
-        tip = "可用 /handoff 接力或 /compact 压缩"
+        else:
+            message = (
+                "Context pressure is rising. Finish the current step and keep the next action clear. "
+                "Mention `/handoff` for a fresh session or `/compact` to stay in this session."
+            )
     else:
         urgency = (
             "Context is near automatic compaction. Avoid starting additional work. "
             if band == "emergency" else "Context pressure is high. Pause at a safe point. "
         )
-        if mode == "auto":
+        if not can_handoff:
+            message = urgency + (
+                "This session has reached max_hops. Recommend `/compact` or wait for the user "
+                "to explicitly raise `--max-hops`."
+            )
+            tip = "已达接力跳数上限，建议用 /compact 压缩"
+        elif mode == "auto":
             message = urgency + AUTO_HANDOFF
             tip = "将自动接力，也可用 /handoff"
         else:
@@ -139,14 +167,46 @@ def _band_notice(assessment: ContextAssessment, band: str, mode: str, *, hook_me
     )
 
 
+def _effective_mode(cfg: Mapping[str, object], state: Mapping[str, object]) -> str:
+    chain_mode = state.get("chain_handoff_mode")
+    if cfg.get("mode_explicit") is not True and chain_mode in ("auto", "propose"):
+        return chain_mode
+    return cfg["mode"]
+
+
+def _noise_notice(
+    nudge: str, telemetry: TranscriptTelemetry, assessment: ContextAssessment, *, hook_metadata: bool
+) -> dict:
+    if nudge == "remote_noise":
+        status = (
+            f"当前上下文中已有 {telemetry.remote_cmd_count} 次远程调用，"
+            f"最近连续 {telemetry.remote_turn_streak} 个工具回合含远程操作。"
+            '剩余 SSH、同步和轮询可交给 `remote-runner`（优先 Model="flash"）。'
+        )
+    else:
+        status = (
+            f"当前上下文中已读取 {telemetry.read_file_count} 次文件，"
+            f"当前上下文 {assessment.active_tokens:,} tokens。"
+            "剩余的广泛只读探索可交给内置 `research` 子代理。"
+        )
+    return _inject(
+        f"[codex-context-handoff:{nudge}] {status}",
+        hook_metadata=hook_metadata, nudge=nudge, user_markdown=status,
+    )
+
+
 def _pre_invocation(
     state: dict,
     user_hash: str,
+    telemetry: TranscriptTelemetry,
     assessment: ContextAssessment | None,
-    mode: str,
+    effective_mode: str,
     *,
+    can_handoff: bool,
+    noise_cfg: dict,
     hook_metadata: bool,
-    suppress_notice: bool = False,
+    suppress_handoff: bool,
+    suppress_noise: bool,
 ) -> dict:
     if user_hash:
         state["last_seen_user_hash"] = user_hash
@@ -154,7 +214,8 @@ def _pre_invocation(
         return {}
 
     epoch = assessment.checkpoint_epoch
-    if state.get("post_handoff_turn_active") is True and state.get("handed_off_epoch") == epoch:
+    if (effective_mode != "off" and state.get("post_handoff_turn_active") is True
+            and state.get("handed_off_epoch") == epoch):
         if not user_hash or user_hash == state.get("handed_off_turn_hash", ""):
             if state.get("post_handoff_reminded"):
                 return {}
@@ -167,22 +228,67 @@ def _pre_invocation(
             )
         state.update(post_handoff_turn_active=False, post_handoff_reminded=False)
 
-    if suppress_notice:
-        return {}
-
+    handoff_enabled = effective_mode != "off" and not suppress_handoff
     if state.get("checkpoint_epoch") != epoch:
-        state.update(checkpoint_epoch=epoch, fired_bands=[], fatigue_fired=False)
+        if handoff_enabled:
+            state.update(checkpoint_epoch=epoch, fired_bands=[], fatigue_fired=False, fired_nudges=[])
+        elif "checkpoint_epoch" in state:
+            state.update(checkpoint_epoch=epoch, fired_nudges=[])
+            if "fired_bands" in state:
+                state["fired_bands"] = []
+            if "fatigue_fired" in state:
+                state["fatigue_fired"] = False
 
-    fired_bands = state.get("fired_bands", [])
-    band = assessment.band
-    if band in BANDS and band not in fired_bands:
-        covered = BANDS[:BANDS.index(band) + 1]
-        state["fired_bands"] = [name for name in BANDS if name in covered or name in fired_bands]
-        return _band_notice(assessment, band, mode, hook_metadata=hook_metadata)
-    if assessment.checkpoint_fatigue and not state.get("fatigue_fired"):
-        state["fatigue_fired"] = True
-        return _band_notice(assessment, "checkpoint_fatigue", mode, hook_metadata=hook_metadata)
-    return {}
+    if handoff_enabled:
+        fired_bands = state.get("fired_bands", [])
+        band = assessment.band
+        if band in BANDS and band not in fired_bands:
+            covered = BANDS[:BANDS.index(band) + 1]
+            state["fired_bands"] = [name for name in BANDS if name in covered or name in fired_bands]
+            return _band_notice(assessment, band, effective_mode,
+                                can_handoff=can_handoff, hook_metadata=hook_metadata)
+        if assessment.checkpoint_fatigue and not state.get("fatigue_fired"):
+            state["fatigue_fired"] = True
+            return _band_notice(assessment, "checkpoint_fatigue", effective_mode,
+                                can_handoff=can_handoff, hook_metadata=hook_metadata)
+
+    if not noise_cfg["enabled"] or suppress_noise:
+        return {}
+    fired_nudges = state.get("fired_nudges", [])
+    if (
+        "remote_noise" not in fired_nudges and "remote-runner" not in telemetry.invoked_subagents
+        and (telemetry.remote_cmd_count >= noise_cfg["remote_cmd_threshold"]
+             or telemetry.remote_turn_streak >= noise_cfg["remote_streak_threshold"])
+    ):
+        nudge = "remote_noise"
+    elif (
+        "read_noise" not in fired_nudges and "research" not in telemetry.invoked_subagents
+        and telemetry.read_file_count >= noise_cfg["read_file_threshold"]
+        and assessment.active_tokens >= noise_cfg["read_file_min_tokens"]
+    ):
+        nudge = "read_noise"
+    else:
+        return {}
+    state.update(checkpoint_epoch=epoch, fired_nudges=[*fired_nudges, nudge])
+    return _noise_notice(nudge, telemetry, assessment, hook_metadata=hook_metadata)
+
+
+def _payload_marks_child(payload: Mapping[str, object], cid: str) -> bool:
+    metadata = payload.get("metadata")
+    for fields in (payload, metadata):
+        if not isinstance(fields, Mapping):
+            continue
+        for key in ("parentConversationId", "parent_conversation_id"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        for key in ("rootConversationId", "root_conversation_id"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip() not in ("", cid):
+                return True
+        if fields.get("isSubagent") is True or fields.get("is_subagent") is True:
+            return True
+    return False
 
 
 def evaluate_context_hook(
@@ -199,17 +305,18 @@ def evaluate_context_hook(
             return {}
         raw_user = payload.get("lastUserInput")
         last_user = raw_user if isinstance(raw_user, str) else ""
-        skip = bool(last_user and SKIP_HANDOFF_RE.search(last_user))
+        skip_handoff = bool(last_user and SKIP_HANDOFF_RE.search(last_user))
 
         environ = os.environ if environ is None else environ
         if profiles is None:
             profiles = load_profiles(environ.get("CODEX_ORCH_PROFILES_FILE") or default_profiles_path())
         cfg = resolve_context_handoff_config(profiles, environ=environ)
-        mode = cfg["mode"]
-        if mode == "off":
+        noise_cfg = cfg["noise_nudge"]
+        noise_enabled = bool(noise_cfg.get("enabled", True))
+        if event == "PreInvocation" and cfg["mode_explicit"] and cfg["mode"] == "off" and not noise_enabled:
             return {}
         if event == "Stop" and (
-            skip or mode != "auto"
+            skip_handoff or (cfg["mode_explicit"] and cfg["mode"] != "auto")
             or payload.get("terminationReason") != "NO_TOOL_CALL"
             or payload.get("fullyIdle") is not True
             or payload.get("continuationActive") is not False
@@ -227,30 +334,41 @@ def evaluate_context_hook(
             return {}
 
         telemetry = read_transcript_telemetry(transcript_path)
+        offline_child = telemetry.is_subagent or _payload_marks_child(payload, cid)
         assessment = evaluate_context_band(telemetry, cfg, model_hint=model_name) if telemetry.exists else None
         user_hash = hash_user_input(last_user)
-        suppress_notice = skip or last_user.lstrip().lower().startswith(("/compact", "/handoff"))
+        is_slash_cmd = last_user.lstrip().lower().startswith(("/compact", "/handoff"))
+        suppress_handoff = skip_handoff or is_slash_cmd
+        suppress_noise = bool(last_user and SKIP_NOISE_NUDGE_RE.search(last_user)) or is_slash_cmd
         needs_lookup = bool(environ.get("ANTIGRAVITY_LS_ADDRESS") and environ.get("ANTIGRAVITY_CSRF_TOKEN"))
         lookup = {}
 
         def update(state):
             if not isinstance(state.get("is_root"), bool):
-                if needs_lookup:
+                if offline_child:
+                    state["is_root"] = False
+                elif needs_lookup:
                     return None
-                state.update(lookup)
+                else:
+                    state.update(lookup)
             if state.get("is_root") is False:
                 return {}
             state.setdefault("conversation_id", cid)
+            effective_mode = _effective_mode(cfg, state)
+            can_handoff = int(state.get("hop_index") or 1) < int(cfg["max_hops"])
             if event == "PreInvocation":
                 return _pre_invocation(
-                    state, user_hash, assessment, mode,
-                    hook_metadata=cfg["hook_metadata"], suppress_notice=suppress_notice,
+                    state, user_hash, telemetry, assessment, effective_mode,
+                    can_handoff=can_handoff, noise_cfg=noise_cfg,
+                    hook_metadata=cfg["hook_metadata"], suppress_handoff=suppress_handoff,
+                    suppress_noise=suppress_noise,
                 )
             if (
-                assessment is not None
+                effective_mode == "auto"
+                and assessment is not None
                 and assessment.band in ("hard", "emergency")
                 and not state.get("handed_off")
-                and int(state.get("hop_index") or 1) < int(cfg["max_hops"])
+                and can_handoff
                 and state.get("stop_nudged_epoch") != assessment.checkpoint_epoch
             ):
                 state["stop_nudged_epoch"] = assessment.checkpoint_epoch

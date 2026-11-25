@@ -33,6 +33,7 @@ CONTEXT_GUARD = SCRIPTS / "hook_context_guard.py"
 HANDOFF_SH = SCRIPTS / "handoff.sh"
 RULES = ROOT / "rules" / "AGENTS.md"
 AGENT = ROOT / "agents" / "codex-worker.md"
+REMOTE_RUNNER = ROOT / "agents" / "remote-runner.md"
 SKILL_NAMES = ("codex-orchestrator", "impl", "review", "dag", "research", "debate", "analyze", "handoff")
 
 
@@ -93,7 +94,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
         self.assertEqual(plugin["displayName"], "Codex Orchestrator")
-        self.assertEqual(plugin["version"], "3.6.0")
+        self.assertEqual(plugin["version"], "3.7.0")
         self.assertEqual(json.loads(PROFILES.read_text(encoding="utf-8"))["version"], plugin["version"])
         self.assertEqual(plugin["logo"], "assets/logo.svg")
         self.assertTrue((ROOT / plugin["logo"]).is_file())
@@ -175,7 +176,9 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertTrue(RULES.is_file(), RULES)
         rules = RULES.read_text(encoding="utf-8")
         self.assertTrue(rules.strip(), RULES)
-        self.assertLessEqual(len(rules.splitlines()), 35)
+        self.assertLessEqual(len(rules.splitlines()), 30)
+        self.assertIn("remote-runner", rules)
+        self.assertIn("research", rules)
 
         agent = self._frontmatter(AGENT)
         self.assertEqual(agent["name"], "codex-worker")
@@ -188,6 +191,18 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertNotIn("edit_file", agent["tools"])
         self.assertNotIn("replace", agent["tools"])
 
+        remote = self._frontmatter(REMOTE_RUNNER)
+        self.assertEqual(remote["name"], "remote-runner")
+        self.assertIs(remote["subagent"], True)
+        self.assertIs(remote["mainAgent"], False)
+        self.assertIs(remote["inheritMcp"], False)
+        self.assertIs(remote["inheritCustomizations"], True)
+        self.assertIsInstance(remote["tools"], list)
+        for tool in ("run_command", "read_file", "manage_task"):
+            self.assertIn(tool, remote["tools"])
+        for tool in ("edit_file", "write_file", "replace", "schedule"):
+            self.assertNotIn(tool, remote["tools"])
+
     def test_eight_skills_valid_and_no_stale_templates(self):
         skill_files = [SKILLS / name / "SKILL.md" for name in SKILL_NAMES]
         for path in skill_files:
@@ -199,7 +214,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 self.assertTrue(skill["description"].strip(), path)
 
         for path in [
-            *skill_files, RULES, AGENT, ROOT / "README.md",
+            *skill_files, RULES, AGENT, REMOTE_RUNNER, ROOT / "README.md",
             REFERENCES / "user-brief-template.md",
             REFERENCES / "research-spec-template.md",
             REFERENCES / "handoff-packet-template.md",
@@ -222,7 +237,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 "深度调研 / 红队辩论 / 实验核查",
             ),
             RULES: ("Communication Charter", "Dynamic Structure Routing", charter.name),
-            ROOT / "README.md": ("v3.6.0", "Communication Charter v3.1", charter.name),
+            ROOT / "README.md": ("v3.7.0", "Communication Charter v3.1", charter.name),
             SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.1", charter.name),
             SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.1", "lightweight route", charter.name),
             SKILLS / "review" / "SKILL.md": ("Communication Charter v3.1", "review", charter.name),

@@ -1,6 +1,12 @@
-# Codex Orchestrator (`v3.6.0`)
+# Codex Orchestrator (`v3.7.0`)
 
 A **Dual-Brain** orchestration plugin for **Google Antigravity** pairing **Gemini** (Principal Manager, Corpus Collector & Verifier) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across software engineering (`/impl`, `/review`, `/dag`), long-horizon session continuity (`/handoff`), and deep research / red-team debate / experiment analysis (`/research`, `/debate`, `/analyze`).
+
+## What's New in v3.7.0
+
+* Route cross-host sync, multi-turn remote probing, and job Launch-Verify-Return to `remote-runner`. Use the built-in `research` subagent for broad read-only exploration across at least five unfamiliar files or log directories.
+* `PreInvocation` suggests delegation from checkpoint-scoped tool counts, using the existing transcript scan and no extra process. Disable these suggestions with `CODEX_NOISE_NUDGE=off`.
+* A dual-track Handoff Packet can pair the main action with an optional subagent wave on the successor's first turn. `--resume-mode auto` tags the successor `handoff-mode:auto` so later hops inherit auto-handoff unless `CODEX_HANDOFF_MODE` explicitly overrides it.
 
 ## What's New in `v3.6.0`
 
@@ -30,13 +36,14 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.6.0`) and icon (`agy plugin validate --strict` clean) |
-| `SPEC.md` | Behavioral specification (`v3.6`) for Session/Hands exit codes, patch custody, Proof-of-Work, TDD, and Session Handoff |
+| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.7.0`) and icon |
+| `SPEC.md` | Behavioral specification (`v3.7`) for exit codes, patch custody, Proof-of-Work, TDD, denoising, and Session Handoff |
 | `hooks.json` | Root `PreToolUse` (`codex-delegate-guard`) and `PreInvocation` + `Stop` (`codex-context-handoff`) lifecycle hook registrations |
 | `rules/AGENTS.md` | Lean (`<= 30` lines) always-on Fold-First ladder, guardrails, handoff policy, and Communication Charter v3.1 pointer |
-| `agents/codex-worker.md` | Context-compression subagent (`inheritMcp: false`) for multi-round repair, SSH/GPU checks, and `/run-workflow` |
+| `agents/codex-worker.md` | Context-compression subagent for multi-round Codex repair, local build/test logs, and read-only `/run-workflow` slices |
+| `agents/remote-runner.md` | Remote SSH, file sync, cluster operations, and job Launch-Verify-Return |
 | `skills/codex-orchestrator/config/profiles.json` | Declarative model, effort, speed, command-budget, schema, and `context_handoff` threshold routing table |
 | `skills/codex-orchestrator/scripts/` | Thin shims (`run_codex.sh`, `run_codex_parallel.sh`, `handoff.sh`, `hook_delegate_guard.py`, `hook_context_guard.py`) + zero-dependency `codex_orch/` Python package |
 | `skills/codex-orchestrator/workflows/` | Reusable Antigravity `/run-workflow` read-only templates (`research_parallel.py`, `debate_multi_critic.py`) |
 | `skills/codex-orchestrator/references/` | 4 strict JSON schemas, Spec & Handoff Packet templates, and Communication Charter (`user-brief-template.md`) |
-| `tests/` | Zero-dependency conformance suites (`test_plugin.py`, `test_handoff.py`) covering `v3.2` + `v3.5` + `v3.6` contracts |
+| `tests/` | Zero-dependency conformance suites (`test_plugin.py`, `test_handoff.py`) covering `v3.7` and earlier contracts |

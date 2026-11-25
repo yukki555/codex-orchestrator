@@ -333,7 +333,8 @@ def build_bootstrap_prompt(*, packet_path: Path, manifest_path: Path, prev_conve
                            max_hops: int, resume_mode: str) -> str:
     if resume_mode == "auto":
         action = (
-            "auto：遵守第 1 节约束，立即执行第 2 节的 Immediate Next Atomic Action，无需重复确认。"
+            "auto：遵守第 1 节约束，立即执行第 2 节的 Immediate Next Atomic Action，无需重复确认；"
+            "若第 2 节包含并行子代理轨（如 `remote-runner` / `research`），首轮即并行派发。"
         )
     else:
         action = "pause：用不超过 5 行中文确认就绪状态并说明第 8 节待决事项，然后等待用户确认。"
@@ -448,7 +449,7 @@ def _reconcile_create(attempt_tag, cid, environ):
     return None
 
 
-def _commit_handoff(cid, state, new_id, *, epoch, chain, hop, is_root, created_at, environ):
+def _commit_handoff(cid, state, new_id, *, epoch, chain, hop, is_root, created_at, environ, resume_mode="pause"):
     state.update(conversation_id=cid, handed_off=True, handed_off_epoch=epoch,
                  handed_off_to=new_id, chain_id=chain, hop_index=hop - 1,
                  post_handoff_turn_active=True,
@@ -458,12 +459,14 @@ def _commit_handoff(cid, state, new_id, *, epoch, chain, hop, is_root, created_a
     if is_root is not None:
         state["is_root"] = is_root
     save_conversation_state(cid, _safe_data(state, environ), environ=environ)
+
+    def seed_successor(successor):
+        successor.update(conversation_id=new_id, is_root=True, chain_id=chain, hop_index=hop)
+        if resume_mode == "auto":
+            successor["chain_handoff_mode"] = "auto"
+
     try:
-        update_conversation_state(
-            new_id, lambda successor: successor.update(
-                conversation_id=new_id, is_root=True, chain_id=chain, hop_index=hop,
-            ), environ=environ,
-        )
+        update_conversation_state(new_id, seed_successor, environ=environ)
     except OSError:
         pass
 
@@ -491,6 +494,7 @@ def _settings(args, environ):
 
 
 def _inspect(args, environ):
+    from .context_hook import _effective_mode, _resolve_is_root
     from .context_telemetry import (evaluate_context_band, load_conversation_state,
                                     read_transcript_telemetry)
 
@@ -498,14 +502,29 @@ def _inspect(args, environ):
     cfg = _settings(args, environ)
     telemetry = read_transcript_telemetry(_transcript_path(args.transcript, cid, environ) or None)
     assessment = evaluate_context_band(telemetry, cfg, model_hint=args.model)
-    state = load_conversation_state(cid, environ=environ) if cid else {}
+    state = load_conversation_state(cid, environ=environ, create=False) if cid else {}
+    resolved_state = dict(state)
+    if not isinstance(resolved_state.get("is_root"), bool) and telemetry.is_subagent:
+        resolved_state["is_root"] = False
+    if _safe_id(cid) and not isinstance(resolved_state.get("is_root"), bool):
+        lookup = {}
+        _resolve_is_root(cid, lookup, environ)
+        for key, value in lookup.items():
+            resolved_state.setdefault(key, value)
     state_keys = ("is_root", "checkpoint_epoch", "fired_bands", "fatigue_fired", "stop_nudged_epoch",
                   "handed_off", "handed_off_epoch", "handed_off_to", "post_handoff_reminded",
-                  "chain_id", "hop_index", "updated_at")
+                  "chain_id", "hop_index", "chain_handoff_mode", "fired_nudges", "updated_at")
     return {
         "exit_code": 0, "conversation_id": cid, "telemetry": vars(telemetry),
         "assessment": assessment.to_dict(), "config": {key: cfg[key] for key in ("mode", "max_hops")},
-        "state": {key: state[key] for key in state_keys if key in state},
+        "effective_mode": _effective_mode(cfg, resolved_state),
+        "tool_activity": {
+            "remote_cmd_count": telemetry.remote_cmd_count,
+            "remote_turn_streak": telemetry.remote_turn_streak,
+            "read_file_count": telemetry.read_file_count,
+            "invoked_subagents": list(telemetry.invoked_subagents),
+        },
+        "state": {key: resolved_state[key] for key in state_keys if key in resolved_state},
     }
 
 
@@ -557,7 +576,7 @@ def _create(args, environ, packet_text, cid):
             _commit_handoff(
                 cid, state, found, epoch=telemetry.checkpoint_epoch, chain=pending["chain_id"],
                 hop=pending["hop_index"], is_root=state.get("is_root"),
-                created_at=pending["created_at"], environ=environ,
+                created_at=pending["created_at"], environ=environ, resume_mode=pending.get("resume_mode", "pause"),
             )
             raise _PreflightError(f"A prior handoff attempt already created successor {found}")
         raise _PreflightError(
@@ -624,9 +643,12 @@ def _create(args, environ, packet_text, cid):
         return receipt
 
     attempt_tag = f"attempt:{uuid.uuid4().hex[:12]}"
+    tags = ["codex-handoff", f"chain:{chain}", f"hop:{hop}", f"from:{cid[:8]}"]
+    if args.resume_mode == "auto":
+        tags.append("handoff-mode:auto")
+    tags.append(attempt_tag)
     payload = {
-        "title": title, "model": model, "tags": ["codex-handoff", f"chain:{chain}", f"hop:{hop}",
-                                                f"from:{cid[:8]}", attempt_tag],
+        "title": title, "model": model, "tags": tags,
         "prompt": [{"text": prompt}],
     }
     project_id = metadata.get("projectId", source.get("projectId")) or environ.get("ANTIGRAVITY_PROJECT_ID")
@@ -643,6 +665,7 @@ def _create(args, environ, packet_text, cid):
         state["pending_handoff"] = {
             "epoch": telemetry.checkpoint_epoch, "chain_id": chain, "hop_index": hop,
             "attempt_tag": attempt_tag, "created_at": datetime.now(timezone.utc).isoformat(),
+            "resume_mode": args.resume_mode,
         }
         save_conversation_state(cid, state, environ=environ)
         attempt_recorded = True
@@ -693,6 +716,7 @@ def _create(args, environ, packet_text, cid):
             _commit_handoff(
                 cid, state, new_id, epoch=telemetry.checkpoint_epoch, chain=chain,
                 hop=hop, is_root=is_root, created_at=receipt["created_at"], environ=environ,
+                resume_mode=args.resume_mode,
             )
         chain_dir = ensure_private_dir(ensure_private_dir(_HANDOFFS) / chain)
         _write(chain_dir / "latest.json", receipt_text)

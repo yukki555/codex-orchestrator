@@ -12,6 +12,13 @@ from pathlib import Path
 
 DEFAULT_CONTEXT_HANDOFF: dict = {
     "default_mode": "propose",
+    "noise_nudge": {
+        "enabled": True,
+        "remote_cmd_threshold": 4,
+        "remote_streak_threshold": 3,
+        "read_file_threshold": 12,
+        "read_file_min_tokens": 80000,
+    },
     "soft_ratio": 0.45,
     "soft_cap_tokens": 200000,
     "hard_ratio": 0.65,
@@ -74,6 +81,17 @@ def _validate_context_handoff(config: object) -> None:
             raise ValueError(f"context_handoff.{key} must be a positive integer")
     if config["soft_cap_tokens"] > config["hard_cap_tokens"]:
         raise ValueError("context_handoff.soft_cap_tokens must not exceed hard_cap_tokens")
+
+    if "noise_nudge" in config:
+        noise = config["noise_nudge"]
+        if not isinstance(noise, dict):
+            raise ValueError("context_handoff.noise_nudge must be an object")
+        if type(noise.get("enabled")) is not bool:
+            raise ValueError("context_handoff.noise_nudge.enabled must be a boolean")
+        for key in ("remote_cmd_threshold", "remote_streak_threshold", "read_file_threshold",
+                    "read_file_min_tokens"):
+            if not _positive_int(noise.get(key)):
+                raise ValueError(f"context_handoff.noise_nudge.{key} must be a positive integer")
 
     for key in ("context_limit_rules", "model_tier_fallbacks"):
         rules = config.get(key)
@@ -151,10 +169,22 @@ def resolve_context_handoff_config(
     profiles: dict | None = None, *, environ: Mapping[str, str] | None = None
 ) -> dict:
     source = os.environ if environ is None else environ
-    config = deepcopy({**DEFAULT_CONTEXT_HANDOFF, **((profiles or {}).get("context_handoff") or {})})
+    raw_context_handoff = (profiles or {}).get("context_handoff") or {}
+    noise = raw_context_handoff.get("noise_nudge")
+    config = deepcopy({
+        **DEFAULT_CONTEXT_HANDOFF,
+        **raw_context_handoff,
+        "noise_nudge": {**DEFAULT_CONTEXT_HANDOFF["noise_nudge"], **(noise if isinstance(noise, dict) else {})},
+    })
 
     mode = source.get("CODEX_HANDOFF_MODE", "").strip().lower()
-    config["mode"] = mode if mode in _HANDOFF_MODES else config["default_mode"]
+    config["mode_explicit"] = mode in _HANDOFF_MODES
+    config["mode"] = mode if config["mode_explicit"] else config["default_mode"]
+    noise_override = source.get("CODEX_NOISE_NUDGE", "").strip().lower()
+    if noise_override in ("1", "true", "on", "yes"):
+        config["noise_nudge"]["enabled"] = True
+    elif noise_override in ("0", "false", "off", "no"):
+        config["noise_nudge"]["enabled"] = False
     config["archive_old"] = source.get("CODEX_HANDOFF_ARCHIVE_OLD", "").strip().lower() in ("1", "true", "yes")
     config["hook_metadata"] = source.get("CODEX_HANDOFF_HOOK_METADATA", "").strip().lower() in ("1", "true", "yes")
     config["model_override"] = source.get("CODEX_HANDOFF_MODEL", "").strip()

@@ -39,15 +39,29 @@ SECTION_NAMES = (
 )
 
 
-def planner(tokens, *, index=1, model=MODEL, cache=0, output=0):
-    return {
+def planner(tokens, *, index=1, model=MODEL, cache=0, output=0, calls=None):
+    row = {
         "type": "PLANNER_RESPONSE", "stepIndex": index, "model": model,
         "usage": {"inputTokens": tokens, "cacheReadTokens": cache, "outputTokens": output},
     }
+    if calls is not None:
+        row["tool_calls"] = calls
+    return row
+
+
+def tool_call(name, **args):
+    return {"name": name, "args": args}
 
 
 def checkpoint(index):
     return {"type": "CHECKPOINT", "stepIndex": index}
+
+
+def subagent_bootstrap():
+    return {
+        "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "step_index": 0,
+        "content": "[Message] timestamp=2026-01-01T00:00:00Z sender=123e4567-e89b-12d3-a456-426614174000",
+    }
 
 
 class ServiceHandler(BaseHTTPRequestHandler):
@@ -130,7 +144,7 @@ class HandoffFixture(unittest.TestCase):
         self.environ = {
             key: value for key, value in os.environ.items()
             if not key.startswith(("ANTIGRAVITY_", "CODEX_HANDOFF_"))
-            and key != "CODEX_ORCH_PROFILES_FILE"
+            and key not in ("CODEX_ORCH_PROFILES_FILE", "CODEX_NOISE_NUDGE")
         }
         self.environ.update({
             "PLUGIN_DATA": str(self.root / "plugin"),
@@ -314,6 +328,38 @@ class TelemetryTests(HandoffFixture):
         self.assertEqual(value.recent_models, ("gpt-oss-120b",))
         self.assertTrue(self.assessment().checkpoint_fatigue)
 
+    def test_subagent_bootstrap_outside_tail_persists_across_compaction(self):
+        work = planner(100, calls=[
+            tool_call("run_command", command="ssh host"),
+            tool_call("read_file", Path="/workspace/item"),
+        ])
+        rows = (" ", subagent_bootstrap(), {"type": "USER_INPUT", "content": "x" * 262144}, work)
+        self.write_transcript(*rows)
+        value = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertIs(value.is_subagent, True)
+        self.assertEqual((value.remote_cmd_count, value.remote_turn_streak, value.read_file_count), (1, 1, 1))
+        self.write_transcript(*rows, checkpoint(2), checkpoint(3), planner(100, index=4))
+        value = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertIs(value.is_subagent, True)
+        self.assertEqual(value.checkpoint_epoch, 2)
+        self.assertEqual((value.remote_cmd_count, value.remote_turn_streak, value.read_file_count), (0, 0, 0))
+
+    def test_only_first_nonblank_row_can_mark_subagent(self):
+        bootstrap = subagent_bootstrap()
+        cases = (
+            ({"type": "USER_INPUT", "step_index": 0}, dict(bootstrap, step_index=1)),
+            (planner(100, index=0), bootstrap),
+            ("bad json", bootstrap),
+            (dict(bootstrap, content="[Message] timestamp=2026-01-01T00:00:00Z"),),
+            (dict(bootstrap, step_index=1),),
+            (dict(bootstrap, step_index=False),),
+            (dict(bootstrap, source="USER"),),
+        )
+        for rows in cases:
+            with self.subTest(rows=rows):
+                self.write_transcript(*rows)
+                self.assertIs(telemetry.read_transcript_telemetry(self.transcript).is_subagent, False)
+
     def test_malformed_truncated_and_missing_transcripts_fail_open(self):
         self.transcript.write_bytes(
             b"bad json\n[]\n" + json.dumps(planner(1234)).encode() + b'\n{"type":"PLANNER'
@@ -325,6 +371,150 @@ class TelemetryTests(HandoffFixture):
         value = telemetry.read_transcript_telemetry(self.transcript)
         self.assertFalse(value.exists)
         self.assertEqual((value.active_tokens, value.malformed_lines, self.assessment().band), (0, 0, "ok"))
+
+    def test_tool_activity_decodes_quoted_args_and_resets_on_checkpoint(self):
+        commands = (
+            "ssh host", "scp host:file .", "rsync file host:", "sbatch job.sh", "squeue",
+            "kubectl exec workload -- date", "docker exec service date",
+        )
+        remote_turns = []
+        for index, command in enumerate(commands):
+            call = (tool_call("run_command", CommandLine=json.dumps(command)) if index % 2 == 0
+                    else tool_call("run_command", command=command))
+            remote_turns.append(planner(100, calls=[call]))
+        remote_turns.extend((
+            planner(100, calls=[tool_call("manage_task", Action=json.dumps(" STATUS "))]),
+            planner(100, calls=[]),
+            planner(100, calls=[None, "malformed"]),
+            planner(100),
+        ))
+        self.write_transcript(*remote_turns)
+        activity = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual((activity.remote_cmd_count, activity.remote_turn_streak), (8, 8))
+
+        excluded_commands = [
+            tool_call("run_command", CommandLine=json.dumps(f'./{script} "ssh host"'))
+            for script in ("run_codex.sh", "run_codex_parallel.sh", "handoff.sh")
+        ]
+        non_remote = planner(100, calls=[
+            *excluded_commands,
+            tool_call("manage_task", action="list"),
+            tool_call("read_file", Path=json.dumps("/workspace/source.txt")),
+            tool_call("read_file", path="/workspace/other.txt"),
+            tool_call("read_file", AbsolutePath=json.dumps("/workspace/handoff/packet.md")),
+            tool_call("read_file", Path=r"C:\workspace\handoff"),
+            tool_call("read_file", Path="/tmp/codex-orchestrator/work/log"),
+            tool_call("read_file", Path="/private/tmp/codex-orchestrator/work/log"),
+            tool_call("invoke_subagent", TypeName=json.dumps(" Remote-Runner ")),
+            tool_call("invoke_subagent", type_name="RESEARCH"),
+            tool_call("invoke_subagent", typeName="remote-runner"),
+        ])
+        non_remote["toolCalls"] = non_remote.pop("tool_calls")
+        self.write_transcript(*remote_turns, non_remote)
+        activity = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual((activity.remote_cmd_count, activity.remote_turn_streak), (8, 0))
+        self.assertEqual(activity.read_file_count, 2)
+        self.assertEqual(activity.invoked_subagents, ("remote-runner", "research"))
+
+        self.write_transcript(*remote_turns, non_remote, remote_turns[0], checkpoint(2))
+        activity = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual((activity.remote_cmd_count, activity.remote_turn_streak, activity.read_file_count), (0, 0, 0))
+        self.assertEqual(activity.invoked_subagents, ())
+
+    def test_remote_activity_uses_shell_command_position(self):
+        for expected, commands in (
+            (0, (
+                "cat ~/.ssh/config",
+                "rg ssh README.md",
+                "kubectl get pods -l app=exec",
+                "docker ps --filter name=exec",
+                'bash /path/run_codex.sh implement --prompt "ssh host && scp file host:"',
+                'zsh -x /path/run_codex_parallel.sh "ssh host"',
+                'sh /path/handoff.sh create --packet "ssh"',
+                'echo "cd /tmp && ssh host"',
+                "kubectl --namespace exec get pods",
+                "docker --host exec ps",
+                "docker -- exec ctr",
+                'rg ssh "unterminated',
+            )),
+            (1, (
+                "kubectl -n training exec worker -- date",
+                "kubectl --namespace=training --context prod exec -it pod -- bash",
+                "docker -H tcp://host:2375 exec -it ctr bash",
+                "cd /tmp && /usr/bin/ssh host date",
+                "FOO=1 timeout 30 rsync -avz a b",
+                "if command true; then time ! nohup ssh host; fi",
+                "pwd\nenv -i -u LANG -C /tmp -S ignored FOO=1 sudo -u user BAR=2 scp a host:",
+                "timeout --kill-after 1 -s TERM 30 nice -n 5 stdbuf -o L squeue",
+                "nice -5 sbatch job.sh",
+                "kubectl --request-timeout=10s --as exec exec pod -- date",
+                'bash /path/run_codex.sh --prompt "ssh host"; ssh host',
+                'cd /tmp && ssh host "unterminated',
+            )),
+        ):
+            for command in commands:
+                with self.subTest(command=command):
+                    self.write_transcript(planner(100, calls=[tool_call("run_command", CommandLine=command)]))
+                    activity = telemetry.read_transcript_telemetry(self.transcript)
+                    self.assertEqual((activity.remote_cmd_count, activity.remote_turn_streak),
+                                     (expected, expected))
+
+    def test_chain_mode_tags_accept_supported_modes_only(self):
+        for mode in ("auto", "propose", "off", "foo"):
+            with self.subTest(mode=mode):
+                expected = {"chain_id": "chain-1", "hop_index": 2}
+                if mode in ("auto", "propose"):
+                    expected["chain_handoff_mode"] = mode
+                self.assertEqual(telemetry.chain_position_from_tags([
+                    "chain:chain-1", "hop:2", f"handoff-mode:{mode}",
+                ]), expected)
+
+    def test_noise_profile_validation_and_legacy_defaults(self):
+        config_file = self.root / "profiles.json"
+        profiles = load_profiles()
+        context = profiles["context_handoff"]
+        noise = context.pop("noise_nudge")
+        config_file.write_text(json.dumps(profiles), encoding="utf-8")
+        legacy = load_profiles(config_file)
+        self.assertEqual(resolve_context_handoff_config(legacy, environ={})["noise_nudge"], noise)
+        invalid_values = {
+            "enabled": 1, "remote_cmd_threshold": 0, "remote_streak_threshold": True,
+            "read_file_threshold": -1, "read_file_min_tokens": "80000",
+        }
+        invalid_overrides = [None, [], {}]
+        invalid_overrides.extend({**noise, key: value} for key, value in invalid_values.items())
+        for override in invalid_overrides:
+            with self.subTest(override=override):
+                context["noise_nudge"] = override
+                config_file.write_text(json.dumps(profiles), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "context_handoff.noise_nudge"):
+                    load_profiles(config_file)
+        config = resolve_context_handoff_config(
+            {"context_handoff": {"noise_nudge": {"enabled": False}}}, environ={},
+        )
+        self.assertEqual(config["noise_nudge"], {**noise, "enabled": False})
+
+    def test_noise_overrides_and_explicit_mode(self):
+        for value, enabled in (
+            ("on", True), ("off", False), ("1", True), ("0", False), ("true", True),
+            ("false", False), (" YeS ", True), (" nO ", False),
+        ):
+            with self.subTest(value=value):
+                config = resolve_context_handoff_config(
+                    {"context_handoff": {"noise_nudge": {"enabled": not enabled}}},
+                    environ={"CODEX_NOISE_NUDGE": value},
+                )
+                self.assertIs(config["noise_nudge"]["enabled"], enabled)
+        config = resolve_context_handoff_config(environ={"CODEX_NOISE_NUDGE": "invalid"})
+        self.assertIs(config["noise_nudge"]["enabled"], True)
+        for raw_mode, mode, explicit in (
+            ("", "propose", False), ("invalid", "propose", False), (" AuTo ", "auto", True),
+            ("propose", "propose", True), ("off", "off", True),
+        ):
+            with self.subTest(raw_mode=raw_mode):
+                config = resolve_context_handoff_config(environ={"CODEX_HANDOFF_MODE": raw_mode})
+                self.assertEqual(config["mode"], mode)
+                self.assertIs(config["mode_explicit"], explicit)
 
     def test_environment_overrides(self):
         for mode in (" AuTo ", " PrOpOsE ", " OfF "):
@@ -498,6 +688,73 @@ class EngineTests(HandoffFixture):
             "checkpoint_epoch": 1, "handed_off": False, "fired_bands": ["soft"], "hop_index": 2,
         })
 
+    def test_inspect_classifies_subagent_offline_without_writing_state(self):
+        self.environ.pop("ANTIGRAVITY_CSRF_TOKEN")
+        self.write_transcript(subagent_bootstrap(), planner(170000))
+        value = self.invoke("inspect", shim=True)
+        self.assertIs(value["telemetry"]["is_subagent"], True)
+        self.assertEqual(value["state"], {"is_root": False})
+        self.assertFalse((Path(self.environ["PLUGIN_DATA"]) / "handoff_state").exists())
+
+    def test_inspect_reports_tool_activity_and_effective_mode(self):
+        self.write_transcript(planner(85000, calls=[
+            tool_call("run_command", CommandLine=json.dumps("ssh host")),
+            tool_call("manage_task", Action="status"),
+            tool_call("read_file", Path="/workspace/input.txt"),
+            tool_call("invoke_subagent", TypeName="Research"),
+        ]))
+        expected_activity = {
+            "remote_cmd_count": 2, "remote_turn_streak": 1,
+            "read_file_count": 1, "invoked_subagents": ["research"],
+        }
+        self.assertEqual(self.invoke("inspect")["effective_mode"], "propose")
+        self.save_state(chain_handoff_mode="auto", fired_nudges=["remote_noise"])
+        for override, effective_mode in (("", "auto"), ("invalid", "auto"), ("propose", "propose"), ("off", "off")):
+            with self.subTest(override=override):
+                value = self.invoke("inspect", extra_env={"CODEX_HANDOFF_MODE": override})
+                self.assertEqual(value["effective_mode"], effective_mode)
+                self.assertEqual(value["tool_activity"], expected_activity)
+                self.assertEqual(value["state"], {
+                    "chain_handoff_mode": "auto", "fired_nudges": ["remote_noise"],
+                })
+
+    def test_inspect_resolves_tags_without_writing_missing_state(self):
+        state_dir = Path(self.environ["PLUGIN_DATA"]) / "handoff_state"
+        expected_state = {
+            "is_root": True, "chain_id": "abc", "hop_index": 2, "chain_handoff_mode": "auto",
+        }
+        calls = self.start_service(lambda _path, _body: (200, {
+            "conversation": {"id": self.cid, "metadata": {
+                "tags": ["codex-handoff", "chain:abc", "hop:2", "handoff-mode:auto"],
+            }},
+        }))
+        for override, mode in (("", "auto"), ("propose", "propose")):
+            with self.subTest(override=override):
+                value = self.invoke("inspect", shim=not self.service_uses_socketpair,
+                                    extra_env={"CODEX_HANDOFF_MODE": override})
+                self.assertEqual(value["effective_mode"], mode)
+                self.assertEqual(value["state"], expected_state)
+                self.assertFalse(state_dir.exists())
+        self.assertEqual([(path, body) for path, _, body in calls],
+                         [(SERVICE + "GetConversation", {"conversationId": self.cid})] * 2)
+        self.assert_rpc_headers(calls)
+
+        self.save_state(hop_index=3, chain_handoff_mode="propose")
+        value = self.invoke("inspect")
+        self.assertEqual(value["effective_mode"], "propose")
+        self.assertEqual(value["state"], {**expected_state, "hop_index": 3, "chain_handoff_mode": "propose"})
+        self.assertEqual(self.state(), {"hop_index": 3, "chain_handoff_mode": "propose"})
+        self.assertEqual(len(calls), 3)
+
+        for is_root in (True, False):
+            self.save_state(is_root=is_root)
+            self.assertEqual(self.invoke("inspect")["state"], {"is_root": is_root})
+        for invalid_env in ({"ANTIGRAVITY_LS_ADDRESS": ""}, {"ANTIGRAVITY_CSRF_TOKEN": ""}):
+            self.save_state()
+            self.assertEqual(self.invoke("inspect", extra_env=invalid_env)["state"], {})
+        self.assertEqual(self.invoke("inspect", "--conversation-id", "../invalid")["state"], {})
+        self.assertEqual(len(calls), 3)
+
     def test_hook_and_shell_share_handoff_state_when_plugin_data_is_hook_only(self):
         self.service()
         self.write_transcript(planner(170000))
@@ -556,7 +813,7 @@ class EngineTests(HandoffFixture):
         self.assertEqual(create["model"], MODEL)
         self.assertEqual(create["title"], "研究任务 [接力 #2]")
         self.assertEqual(create["tags"][:-1], [
-            "codex-handoff", f"chain:{self.chain}", "hop:2", f"from:{self.cid[:8]}",
+            "codex-handoff", f"chain:{self.chain}", "hop:2", f"from:{self.cid[:8]}", "handoff-mode:auto",
         ])
         self.assertRegex(create["tags"][-1], r"^attempt:[0-9a-f]{12}$")
         self.assertEqual(calls[2][2], {
@@ -591,6 +848,7 @@ class EngineTests(HandoffFixture):
         self.assertEqual(self.state()["handed_off_turn_hash"], turn_hash)
         self.assertEqual(telemetry.load_conversation_state("successor-1", environ=self.environ), {
             "conversation_id": "successor-1", "is_root": True, "chain_id": self.chain, "hop_index": 2,
+            "chain_handoff_mode": "auto",
         })
 
         prompt = create["prompt"][0]["text"]
@@ -607,7 +865,8 @@ class EngineTests(HandoffFixture):
         for fragment in ("3 秒", "git rev-parse HEAD", "git status --short", "第 9 节", "清单"):
             self.assertIn(fragment, sanity_step)
         self.assertTrue(resume_step.startswith("3. auto"))
-        for fragment in ("第 1 节约束", "第 2 节", "Immediate Next Atomic Action", "无需重复确认"):
+        for fragment in ("第 1 节约束", "第 2 节", "Immediate Next Atomic Action", "无需重复确认",
+                         "remote-runner", "research", "首轮即并行派发"):
             self.assertIn(fragment, resume_step)
         expected = {
             "prev_conversation_id": self.cid, "prev_transcript_path": str(self.transcript),
@@ -623,6 +882,10 @@ class EngineTests(HandoffFixture):
         result = self.create("--conversation-id", "successor-1", "--archive-old", "--resume-mode", "pause")
         self.assertEqual(result["hop_index"], 3)
         self.assertEqual(calls[1][2]["title"], "研究任务 [接力 #3]")
+        self.assertNotIn("handoff-mode:auto", calls[1][2]["tags"])
+        self.assertNotIn("chain_handoff_mode", telemetry.load_conversation_state(
+            "successor-2", environ=self.environ,
+        ))
         self.assertEqual(calls[3][2], {
             "conversationId": "successor-1",
             "annotations": {"tags": ["existing", "handoff-completed"], "archived": True},
@@ -741,7 +1004,8 @@ class EngineTests(HandoffFixture):
                     return load(response)
 
                 with mock.patch.object(handoff.json, "load", side_effect=read_response):
-                    result = self.create(exit_code=0 if visible else 7)
+                    result = self.create("--resume-mode", "auto", exit_code=0 if visible else 7)
+                self.assertEqual(attempts[0]["resume_mode"], "auto")
                 tag = result.get("attempt_tag") or attempts[0]["attempt_tag"]
                 self.assertRegex(tag, r"^attempt:[0-9a-f]{12}$")
                 if immediately_visible:
@@ -760,6 +1024,9 @@ class EngineTests(HandoffFixture):
                     self.assertIn("already created successor existing-successor", self.create(exit_code=2)["error"])
                 self.assertNotIn("pending_handoff", self.state())
                 self.assertEqual(self.state()["handed_off_to"], "existing-successor")
+                self.assertEqual(telemetry.load_conversation_state(
+                    "existing-successor", environ=self.environ,
+                )["chain_handoff_mode"], "auto")
                 creates = [body for path, _, body in calls if path == SERVICE + "CreateConversation"]
                 self.assertEqual(len(creates), 1)
                 self.assertIn(tag, creates[0]["tags"])
@@ -824,6 +1091,13 @@ class EngineTests(HandoffFixture):
 
 
 class HookTests(HandoffFixture):
+    def noise_plan(self, tokens=80000, *, remote=0, reads=0, subagent=None):
+        calls = [tool_call("run_command", CommandLine=json.dumps("ssh host")) for _ in range(remote)]
+        calls.extend(tool_call("read_file", Path=f"/workspace/item-{index}") for index in range(reads))
+        if subagent:
+            calls.append(tool_call("invoke_subagent", TypeName=json.dumps(subagent)))
+        return planner(tokens, calls=calls)
+
     def message(self, result, *, hook_metadata=False):
         self.assertEqual(len(result.get("injectSteps", [])), 1, result)
         message = result["injectSteps"][0]["systemMessage"]
@@ -837,6 +1111,89 @@ class HookTests(HandoffFixture):
         self.assertIn(" tokens（", message)
         self.assertIn("/handoff", message)
         return message
+
+    def assert_nudge(self, result, nudge, *fragments):
+        message = self.message(result)["systemMessage"]
+        self.assertTrue(message.startswith(f"[codex-context-handoff:{nudge}] "), message)
+        for fragment in fragments:
+            self.assertIn(fragment, message)
+
+    def test_remote_noise_by_count_or_streak_once_per_checkpoint(self):
+        remote_turn = self.noise_plan(remote=1)
+        self.write_transcript(self.noise_plan(remote=3))
+        self.assertEqual(self.hook(), {})
+        self.write_transcript(self.noise_plan(remote=4))
+        self.assert_nudge(self.hook(), "remote_noise", "4 次", "1 个", "remote-runner", 'Model="flash"')
+        self.assertEqual(self.hook(), {})
+
+        self.write_transcript(checkpoint(2), remote_turn, remote_turn, planner(80000), remote_turn)
+        self.assert_nudge(self.hook(), "remote_noise", "3 次", "3 个")
+        self.assertEqual(self.hook(), {})
+        self.assertEqual(self.state()["fired_nudges"], ["remote_noise"])
+        self.assertEqual(self.state()["checkpoint_epoch"], 1)
+
+    def test_remote_noise_skips_existing_remote_runner(self):
+        self.write_transcript(self.noise_plan(remote=4, subagent="Remote-Runner"))
+        self.assertEqual(self.hook(), {})
+        self.write_transcript(self.noise_plan(remote=4, subagent="Remote-Runner"),
+                              checkpoint(2), self.noise_plan(remote=4))
+        self.assert_nudge(self.hook(), "remote_noise", "remote-runner")
+
+    def test_read_noise_requires_both_thresholds_and_skips_existing_research(self):
+        for plan in (self.noise_plan(79999, reads=12), self.noise_plan(reads=11),
+                     self.noise_plan(reads=12, subagent="Research")):
+            self.write_transcript(plan)
+            self.assertEqual(self.hook(), {})
+        self.write_transcript(self.noise_plan(reads=12, subagent="Research"),
+                              checkpoint(2), self.noise_plan(reads=12))
+        self.assert_nudge(self.hook(), "read_noise", "12 次", "80,000 tokens", "research")
+        self.assertEqual(self.hook(), {})
+        self.assertEqual(self.state()["fired_nudges"], ["read_noise"])
+
+    def test_vertical_then_remote_then_read_each_inject_once(self):
+        self.write_transcript(self.noise_plan(120000, remote=4, reads=12))
+        self.assert_band(self.hook(), "soft")
+        self.assert_nudge(self.hook(), "remote_noise", "remote-runner")
+        self.assert_nudge(self.hook(), "read_noise", "research")
+        self.assertEqual(self.hook(), {})
+
+    def test_noise_controls_are_independent_and_opt_outs_are_not_recorded(self):
+        self.write_transcript(self.noise_plan(170000, remote=4))
+        self.environ["CODEX_NOISE_NUDGE"] = "off"
+        self.assert_band(self.hook(), "hard")
+        self.assertEqual(self.hook(), {})
+        self.environ["CODEX_HANDOFF_MODE"] = "off"
+        self.save_state()
+        self.assertEqual(self.hook(), {})
+        self.assertEqual(self.state(), {})
+
+        self.environ["CODEX_NOISE_NUDGE"] = "on"
+        for prompt in ("不用子代理", "别用子代理", "不要子代理", "主循环直跑", "关闭降噪提醒",
+                       "skip noise nudge", "NO NOISE NUDGE", "disable noise nudge", "no subagent",
+                       "  /Compact", "/handoff"):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(self.hook(lastUserInput=prompt), {})
+                self.assertNotIn("fired_nudges", self.state())
+        self.assert_nudge(self.hook(), "remote_noise", "remote-runner")
+        self.assertNotIn("fired_bands", self.state())
+        self.assertEqual(self.hook(), {})
+        self.write_transcript(checkpoint(2), self.noise_plan(170000, remote=4))
+        self.assert_nudge(self.hook(), "remote_noise", "remote-runner")
+
+        self.environ.pop("CODEX_HANDOFF_MODE")
+        self.save_state()
+        self.assert_band(self.hook(lastUserInput="no subagent"), "hard")
+        self.assertEqual(self.hook(lastUserInput="no subagent"), {})
+        self.assert_nudge(self.hook(lastUserInput="skip handoff"), "remote_noise", "remote-runner")
+
+    def test_noise_opt_in_metadata_uses_inject_envelope(self):
+        self.environ["CODEX_HANDOFF_HOOK_METADATA"] = "true"
+        self.write_transcript(self.noise_plan(remote=4))
+        message = self.message(self.hook(), hook_metadata=True)
+        self.assertEqual(message["metadata"], {
+            "source": "codex-context-handoff", "nudge": "remote_noise",
+            "user_markdown": message["systemMessage"].split("] ", 1)[1],
+        })
 
     def test_preinvocation_fires_soft_then_hard_once_and_resets_after_checkpoint(self):
         soft = planner(120000)
@@ -858,6 +1215,53 @@ class HookTests(HandoffFixture):
         self.assertEqual(self.state()["fired_bands"], [])
         self.write_transcript(soft, hard, checkpoint(3), planner(120000, index=4))
         self.assert_band(self.hook(), "soft")
+
+    def assert_hop_limit_notice(self, band, *fragments):
+        message = self.message(self.hook())["systemMessage"]
+        self.assertTrue(message.startswith(f"[codex-context-handoff:{band}] 上下文 "), message)
+        self.assertNotIn("handoff.sh create", message)
+        self.assertNotIn("`/handoff`", message)
+        for fragment in ("已达接力跳数上限", "/compact", *fragments):
+            self.assertIn(fragment, message)
+
+    def test_preinvocation_at_max_hops_keeps_pressure_urgency(self):
+        calls = self.start_service(lambda _path, _body: (200, {
+            "conversation": {"id": self.cid, "metadata": {
+                "tags": ["codex-handoff", "chain:abc", "hop:5", "handoff-mode:auto"],
+            }},
+        }))
+        for inherited in (False, True):
+            self.environ["CODEX_HANDOFF_MODE"] = "" if inherited else "auto"
+            for band, tokens, urgency in (
+                ("hard", 170000, "Pause at a safe point."),
+                ("emergency", 210000, "Avoid starting additional work."),
+            ):
+                with self.subTest(inherited=inherited, band=band):
+                    if inherited:
+                        self.save_state()
+                    else:
+                        self.save_state(is_root=True, hop_index=5)
+                    self.write_transcript(planner(tokens))
+                    self.assert_hop_limit_notice(band, urgency, "--max-hops")
+                    self.assertEqual(self.state()["hop_index"], 5)
+                    if inherited:
+                        self.assertEqual(self.state()["chain_handoff_mode"], "auto")
+        self.assertEqual([path for path, _, _ in calls], [SERVICE + "GetConversation"] * 2)
+
+    def test_preinvocation_at_max_hops_suggests_compaction_for_soft_and_fatigue(self):
+        self.environ["CODEX_HANDOFF_MODE"] = "auto"
+        self.save_state(hop_index=5)
+        self.write_transcript(planner(120000))
+        self.assert_hop_limit_notice("soft", "已达接力跳数上限，可用 /compact 压缩")
+        self.write_transcript(planner(120000), checkpoint(2), checkpoint(3))
+        self.assert_hop_limit_notice("checkpoint_fatigue", "已多次压缩", "Ask the user", "--max-hops")
+
+    def test_preinvocation_below_max_hops_keeps_auto_handoff(self):
+        self.environ["CODEX_HANDOFF_MODE"] = "auto"
+        self.save_state(hop_index=4)
+        self.write_transcript(planner(170000))
+        self.assertIn("handoff.sh create --packet <packet> --resume-mode auto",
+                      self.assert_band(self.hook(), "hard"))
 
     def test_checkpoint_fatigue_fires_once(self):
         self.write_transcript(planner(200000), checkpoint(2), checkpoint(3))
@@ -895,12 +1299,72 @@ class HookTests(HandoffFixture):
         self.environ["CODEX_HANDOFF_MODE"] = "propose"
         self.assert_band(self.hook(), "hard")
 
+    def test_subagent_transcript_suppresses_notices_offline(self):
+        self.environ.pop("ANTIGRAVITY_CSRF_TOKEN")
+        self.environ["CODEX_HANDOFF_MODE"] = "auto"
+        cases = (
+            ("read_noise", "PreInvocation", self.noise_plan(reads=12)),
+            ("remote_noise", "PreInvocation", self.noise_plan(remote=4)),
+            ("hard", "PreInvocation", planner(170000)),
+            ("fatigue", "PreInvocation", planner(100)),
+            ("auto_handoff", "Stop", planner(170000)),
+        )
+        for notice, event, work in cases:
+            with self.subTest(notice=notice):
+                self.save_state()
+                checkpoints = (checkpoint(1), checkpoint(2)) if notice == "fatigue" else ()
+                self.write_transcript(subagent_bootstrap(), *checkpoints, work)
+                self.assertEqual(self.hook(event), {})
+                state = self.state()
+                self.assertIs(state["is_root"], False)
+                for key in ("fired_nudges", "last_seen_user_hash", "fired_bands", "fatigue_fired", "stop_nudged_epoch"):
+                    self.assertNotIn(key, state)
+
+    def test_subagent_transcript_repairs_stale_state_without_rpc(self):
+        self.environ.update(ANTIGRAVITY_LS_ADDRESS="http://127.0.0.1:1", CODEX_HANDOFF_MODE="auto")
+        self.save_state(hop_index=2, chain_handoff_mode="auto")
+        self.write_transcript(subagent_bootstrap(), planner(170000))
+        with mock.patch("codex_orch.context_hook._resolve_is_root") as lookup:
+            self.assertEqual(self.hook("Stop"), {})
+            self.assertEqual(self.hook(), {})
+        lookup.assert_not_called()
+        state = self.state()
+        self.assertIs(state["is_root"], False)
+        self.assertEqual((state["hop_index"], state["chain_handoff_mode"]), (2, "auto"))
+        for key in ("fired_nudges", "last_seen_user_hash", "stop_nudged_epoch"):
+            self.assertNotIn(key, state)
+
+    def test_payload_marks_child_offline_at_top_level_or_in_metadata(self):
+        self.environ.pop("ANTIGRAVITY_CSRF_TOKEN")
+        self.write_transcript(planner(170000))
+        for key, value in (
+            ("parentConversationId", " parent "), ("parent_conversation_id", "parent"),
+            ("rootConversationId", " root "), ("root_conversation_id", "root"),
+            ("isSubagent", True), ("is_subagent", True),
+        ):
+            for fields in ({key: value}, {"metadata": {key: value}}):
+                with self.subTest(fields=fields):
+                    self.save_state()
+                    self.assertEqual(self.hook(**fields), {})
+                    self.assertIs(self.state()["is_root"], False)
+
+    def test_malformed_and_root_payload_fields_preserve_root_notices(self):
+        self.environ.pop("ANTIGRAVITY_CSRF_TOKEN")
+        self.write_transcript(planner(170000))
+        self.assert_band(self.hook(
+            parentConversationId=" ", parent_conversation_id=["parent"],
+            rootConversationId=f" {self.cid} ", root_conversation_id=42,
+            isSubagent="true", is_subagent=1, metadata=[{"isSubagent": True}],
+        ), "hard")
+        self.assertNotIn("is_root", self.state())
+
     def test_child_is_skipped_and_cached_using_conversation_service(self):
         calls = self.start_service(lambda _path, _body: (200, {
             "id": self.cid, "metadata": {"rootConversationId": "different-root"},
         }))
-        self.write_transcript(planner(170000))
+        self.write_transcript(self.noise_plan(170000, remote=10, reads=20))
         self.assertEqual(self.hook(), {})
+        self.assertNotIn("fired_nudges", self.state())
         self.assertIs(self.state()["is_root"], False)
         self.assertNotIn("last_seen_user_hash", self.state())
         self.assertEqual(self.hook(), {})
@@ -1024,6 +1488,28 @@ class HookTests(HandoffFixture):
         self.write_transcript(planner(170000), checkpoint(2), planner(170000, index=3))
         self.assertEqual(self.hook("Stop", lastUserInput=None)["decision"], "continue")
         self.assertEqual(self.state()["stop_nudged_epoch"], 1)
+
+    def test_stop_inherits_auto_from_rpc_tags_and_caches_mode(self):
+        self.write_transcript(planner(170000))
+        calls = self.start_service(lambda _path, _body: (200, {
+            "conversation": {"id": self.cid, "metadata": {
+                "tags": ["codex-handoff", "chain:example", "hop:2", "handoff-mode:auto"],
+            }},
+        }))
+        result = self.hook("Stop")
+        self.assertEqual(result["decision"], "continue")
+        self.assertIn("--resume-mode auto", result["reason"])
+        self.assertEqual(self.state()["chain_handoff_mode"], "auto")
+        self.assertEqual(self.hook("Stop"), {})
+        self.assertEqual([path for path, _, _ in calls], [SERVICE + "GetConversation"])
+
+    def test_stop_inherits_auto_from_state_and_honors_explicit_overrides(self):
+        self.write_transcript(planner(170000))
+        for override, decision in (("", "continue"), ("invalid", "continue"), ("propose", None), ("off", None)):
+            with self.subTest(override=override):
+                self.save_state(chain_handoff_mode="auto", is_root=True)
+                self.environ["CODEX_HANDOFF_MODE"] = override
+                self.assertEqual(self.hook("Stop").get("decision"), decision)
 
     def test_successor_at_max_hops_syncs_hop_from_tags_and_skips_stop_continue(self):
         self.environ.update(CODEX_HANDOFF_MODE="auto", CODEX_HANDOFF_MAX_HOPS="5")

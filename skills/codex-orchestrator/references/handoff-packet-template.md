@@ -1,4 +1,4 @@
-# Session Handoff Packet Template (`v3.6`)
+# Session Handoff Packet Template (`v3.7`)
 
 Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24 KB`) following all 8 sections below before invoking `handoff.sh create`. Remove every `<!-- ... -->` comment before submission (`handoff.sh` fails closed on unresolved placeholders, missing sections, nonexistent paths in Sections 6–7, or unredacted secrets). Section `## 9. Deterministic Runtime Snapshot` is collected and appended automatically by `handoff.sh`.
 
@@ -12,7 +12,9 @@ Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24
 - [x] Phase 1 — Completed item (verified via `<command / artifact>`)
 - [~] Phase 2 — Current milestone state
 - [ ] Phase 3 — Remaining milestone
-- **Immediate Next Atomic Action**: State the exact first step the successor should execute immediately after cold-start verification.
+- **Immediate Next Atomic Action**. State the first actions after cold-start verification:
+  - **Main Track**. Specify the primary manager decision or one-hop `run_codex.sh` action.
+  - **Parallel Subagent Track (Optional)**. Specify a short atomic wave to launch in parallel on Turn 1. Use `remote-runner` for sync or Launch-Verify-Return, or built-in `research` for broad read-only exploration.
 
 ## 3. Verified Facts & Evidence Anchors
 - Separate confirmed facts from hypotheses. Cite exact `file:line`, commit SHAs, command exit codes, and measured metrics.
@@ -37,6 +39,8 @@ Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24
 ```
 
 ## Anti-Patterns to Avoid
+
+- Keep each subagent assignment to one atomic wave. Multi-phase assignments and multi-hour waits delay the Quiescence Gate before `/handoff`.
 - Do **not** paste raw build logs, long stack traces, or full source files (link exact paths and summarize verified root causes instead).
 - Do **not** omit rejected dead ends or implicit user preferences stated early in the session.
 - Do **not** include API keys, SSH passwords, or `ANTIGRAVITY_CSRF_TOKEN`.

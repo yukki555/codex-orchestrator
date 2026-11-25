@@ -1,5 +1,10 @@
 # Codex Orchestrator — Backlog & TODO
 
+## Horizontal Subagent Denoising & Chain-Inherited Auto-Handoff (`v3.7.0`)
+
+- [x] Add `remote-runner` and built-in `research` routing, plus configurable checkpoint-scoped noise nudges.
+- [x] Propagate auto-handoff to successor conversations and support a parallel subagent track in the Handoff Packet.
+
 ## Context Compaction & Session Handoff Automation (`v3.6.0`)
 
 **Status**: Option 1 & Option 3 Implemented in `v3.6.0`; Option 2 Backlog  
