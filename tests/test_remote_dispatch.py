@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import io
@@ -18,7 +19,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "codex-orchestrator"
@@ -1049,6 +1050,105 @@ class SchedulerCoreTests(unittest.TestCase):
         state = init_run_state(cluster, manifest, cluster_path="cluster.json", manifest_path="tasks.json", now=0)
         advance_dag_states(state, specs, 0)
         return cluster, manifest, specs, state
+
+    def test_probe_request_and_remote_command_only_forward_allowlisted_host_env(self):
+        runtime_env = {
+            "PATH": "/usr/local/PPU_SDK/CUDA_SDK/bin:/usr/bin",
+            "LD_LIBRARY_PATH": "/usr/local/PPU_SDK/CUDA_SDK/lib64:/usr/local/PPU_SDK/lib",
+            "PPU_SDK": "/usr/local/PPU_SDK",
+        }
+        host = self.host(env={**runtime_env, "OPENAI_API_KEY": "secret-key", "HF_TOKEN": "secret-token"})
+        request = build_probe_request(host, [])
+        self.assertEqual(request["env"], runtime_env)
+        transport = Mock(spec=SshTransport)
+        transport.run_remote.return_value = SshResult(True, 0, "{}", "", 0.0)
+        self.assertTrue(probe_host(transport, host, []).ok)
+        args, kwargs = transport.run_remote.call_args
+        self.assertEqual(args[0], host)
+        self.assertEqual(kwargs, {"timeout_s": 25.0})
+        sent_request = json.loads(base64.b64decode(shlex.split(args[1])[-1]))
+        self.assertEqual(sent_request, request)
+        for secret in ("OPENAI_API_KEY", "HF_TOKEN", "secret-key", "secret-token"):
+            self.assertNotIn(secret, json.dumps(sent_request))
+
+    def test_ppu_probe_resolves_nvidia_smi_from_host_env_and_accounts_for_managed_holders(self):
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        smi = bin_dir / "nvidia-smi"
+        smi.write_text(r"""#!/bin/sh
+[ "$2" = "--format=csv,noheader,nounits" ] || exit 2
+case "$1" in
+    --query-gpu=index,uuid,memory.total,memory.used,utilization.gpu)
+        printf '0, PPU-1, 32768, 4600, 37\n' ;;
+    --query-compute-apps=gpu_uuid,pid,used_gpu_memory)
+        printf 'PPU-1, 901, 3000\nPPU-1, 902, 1600\n' ;;
+    *) exit 2 ;;
+esac
+""")
+        smi.chmod(0o755)
+        proc = self.root / "proc"
+        descriptors = proc / "21" / "fd"
+        descriptors.mkdir(parents=True)
+        (descriptors / "3").symlink_to("/dev/alixpu_ppu0")
+
+        host = self.host(accelerator="ppu", env={"PATH": str(bin_dir), "PPU_SDK": str(self.root)})
+        attempt = {"task_id": "job", "attempt": 1, "pgid": 20, "attempt_dir": str(self.root),
+                   "out_dir": str(self.root), "done_markers": [], "gpu_ids": [0]}
+        request = build_probe_request(host, [attempt])
+        namespace = {}
+        exec(REMOTE_PROBE_SCRIPT, namespace)
+        holders = namespace["count_managed_gpu_holders"]
+        namespace["count_managed_gpu_holders"] = lambda processes, pgids, index: holders(
+            processes, pgids, index, proc,
+        )
+        namespace["parse_processes"] = lambda: {21: 20}
+        output = io.StringIO()
+        namespace["print"] = output.write
+        with patch.dict(os.environ, {"PATH": str(self.root)}, clear=True):
+            namespace["main"](request)
+            self.assertEqual(os.environ["PATH"], str(self.root))
+            self.assertNotIn("PPU_SDK", os.environ)
+            with patch.dict(namespace, {"parse_processes": Mock(side_effect=RuntimeError)}):
+                with self.assertRaises(RuntimeError):
+                    namespace["main"](request)
+            self.assertEqual(os.environ["PATH"], str(self.root))
+            self.assertNotIn("PPU_SDK", os.environ)
+
+        raw = output.getvalue()
+        self.assertNotIn("probe_warning", json.loads(raw))
+        snapshot = parse_probe_response(host, raw)
+        self.assertTrue(snapshot.ok)
+        self.assertEqual(snapshot.gpus, [
+            GpuSlotSnapshot(0, memory_total_mb=32768, memory_used_mb=4600, utilization_pct=37,
+                            external_pids=[902], external_busy=True),
+        ])
+
+    def test_ppu_probe_falls_back_and_honors_custom_command(self):
+        namespace = {}
+        exec(REMOTE_PROBE_SCRIPT, namespace)
+        gpu_query = namespace["GPU_QUERY"]
+        custom_output = '[{"index": 2, "memory_used_mb": 34}]'
+        custom = f"printf '%s' {shlex.quote(custom_output)}"
+        for command, responses, expected_calls, expected_slot, warning in (
+            (None, [None, "1, PPU-2, 32768, 1200, 14"],
+             [["nvidia-smi", *gpu_query], ["ppu-smi", *gpu_query]],
+             GpuSlotSnapshot(1, memory_total_mb=32768, memory_used_mb=1200, utilization_pct=14), None),
+            (custom, [custom_output],
+             [["/bin/sh", "-c", custom]], GpuSlotSnapshot(2, memory_used_mb=34), None),
+            (custom, [None], [["/bin/sh", "-c", custom]], GpuSlotSnapshot(2),
+             "PPU probe returned no GPU inventory. Configured GPU indices were used."),
+        ):
+            with self.subTest(command=command, responses=responses):
+                host = self.host(accelerator="ppu", ppu_probe_cmd=command, gpu_ids=(expected_slot.index,))
+                namespace["parse_processes"] = lambda: {}
+                namespace["capture"] = Mock(side_effect=responses)
+                output = io.StringIO()
+                namespace["print"] = output.write
+                namespace["main"](build_probe_request(host, []))
+                self.assertEqual([call.args[0] for call in namespace["capture"].call_args_list], expected_calls)
+                raw = output.getvalue()
+                self.assertEqual(json.loads(raw).get("probe_warning"), warning)
+                self.assertEqual(parse_probe_response(host, raw).gpus, [expected_slot])
 
     def test_pid_namespace_probe_accounts_for_managed_device_holders(self):
         host = self.host()

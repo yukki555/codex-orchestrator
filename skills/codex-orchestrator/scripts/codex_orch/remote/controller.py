@@ -1131,7 +1131,8 @@ def _emit(result: dict[str, Any], output_format: str) -> None:
         _table("HOSTS / GPUS", ("HOST", "OK", "DISK_GB", "GPU", "MEM_MB", "UTIL%", "EXT_BUSY"), [
             (host_id, host.get("ok"), host.get("disk_free_gb"), gpu.get("index"),
              f"{gpu['memory_used_mb']}/{gpu['memory_total_mb']}" if gpu else None,
-             gpu.get("utilization_pct"), gpu.get("external_busy"))
+             gpu.get("utilization_pct"),
+             bool(gpu.get("external_busy") or gpu.get("external_pids")) if gpu else None)
             for host_id, host in sorted(hosts.items()) for gpu in (host.get("gpus") or [{}])
         ])
         _table("EXECUTION_ORDER", ("TASK_ID",), [(tid,) for tid in result["execution_order"]])

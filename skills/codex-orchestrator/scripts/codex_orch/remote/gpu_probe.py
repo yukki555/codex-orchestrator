@@ -13,6 +13,12 @@ from .models import AttemptProbeStatus, GpuSlotSnapshot, HostConfig, HostProbeSn
 from .ssh_transport import SshTransport
 
 
+PROBE_ENV_ALLOWLIST = (
+    "PATH", "LD_LIBRARY_PATH", "LIBRARY_PATH", "CUDA_HOME", "CUDA_PATH", "CUDA_SDK",
+    "PPU_HOME", "PPU_PATH", "PPU_SDK", "CUDA_VISIBLE_DEVICES", "PPU_VISIBLE_DEVICES",
+)
+
+
 REMOTE_PROBE_SCRIPT = r"""
 import base64
 import csv
@@ -89,7 +95,7 @@ def count_managed_gpu_holders(processes, lease_pgids, gpu_index, proc_root="/pro
     if not lease_pgids or not os.path.isdir(proc_root):
         return 0
     holders = 0
-    device = f"/dev/nvidia{gpu_index}"
+    devices = (f"/dev/nvidia{gpu_index}", f"/dev/alixpu_ppu{gpu_index}")
     for pid, pgid in processes.items():
         if pgid not in lease_pgids and pid not in lease_pgids:
             continue
@@ -100,7 +106,7 @@ def count_managed_gpu_holders(processes, lease_pgids, gpu_index, proc_root="/pro
             continue
         for fd in descriptors:
             try:
-                if os.readlink(f"{directory}/{fd}") == device:
+                if os.readlink(f"{directory}/{fd}") in devices:
                     holders += 1
                     break
             except OSError:
@@ -140,8 +146,12 @@ def nvidia_slots(processes, managed, leased_gpu_pgids):
     warning = None if compute is not None else "nvidia-smi compute-app inventory is unavailable."
     return list(slots.values()), warning
 
-def ppu_slots(request):
+def ppu_slots(request, processes, managed, leased_gpu_pgids):
     custom = request["ppu_probe_cmd"]
+    if not custom:
+        slots, warning = nvidia_slots(processes, managed, leased_gpu_pgids)
+        if slots:
+            return slots, warning
     output = capture(["/bin/sh", "-c", custom] if custom else ["ppu-smi", *GPU_QUERY])
     slots = []
     if output:
@@ -233,20 +243,23 @@ def disk_free(work_root):
             continue
     return None
 
-def main(request):
+def probe(request):
     processes = parse_processes()
     live_pgids = set(processes.values())
     gpus, warning = [], None
-    if request["accelerator"] == "nvidia":
+    accelerator = request["accelerator"]
+    if accelerator in ("nvidia", "ppu"):
+        managed = set(request["managed_pgids"])
         leased_gpu_pgids = defaultdict(set)
         for attempt in request["attempts"]:
             pgid = attempt["pgid"]
             if type(pgid) is int and pgid > 1 and (pgid in live_pgids or kill0_pgid(pgid)):
                 for gpu_index in attempt.get("gpu_ids", []):
                     leased_gpu_pgids[gpu_index].add(pgid)
-        gpus, warning = nvidia_slots(processes, set(request["managed_pgids"]), leased_gpu_pgids)
-    elif request["accelerator"] == "ppu":
-        gpus, warning = ppu_slots(request)
+        if accelerator == "nvidia":
+            gpus, warning = nvidia_slots(processes, managed, leased_gpu_pgids)
+        else:
+            gpus, warning = ppu_slots(request, processes, managed, leased_gpu_pgids)
     allowed_indices = request["gpu_ids"]
     result = {
         "gpus": sorted(
@@ -267,6 +280,20 @@ def main(request):
     }
     if warning:
         result["probe_warning"] = warning
+    return result
+
+def main(request):
+    env = request.get("env") or {}
+    previous = {key: os.environ.get(key) for key in env}
+    try:
+        os.environ.update(env)
+        result = probe(request)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     print(json.dumps(result, separators=(",", ":"), allow_nan=False))
 
 if __name__ == "__main__":
@@ -289,6 +316,7 @@ def build_probe_request(
         "gpu_ids": list(host.gpu_ids) if host.gpu_ids is not None else None,
         "work_root": host.work_root,
         "ppu_probe_cmd": host.ppu_probe_cmd,
+        "env": {k: v for k, v in host.env.items() if k in PROBE_ENV_ALLOWLIST},
         "managed_pgids": sorted({
             attempt["pgid"] for attempt in attempts
             if type(attempt["pgid"]) is int and attempt["pgid"] > 1
