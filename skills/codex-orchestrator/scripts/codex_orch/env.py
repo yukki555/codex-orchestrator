@@ -30,6 +30,17 @@ _SECRET = re.compile(
 )
 
 
+def plugin_data_dir(
+    environ: Mapping[str, str] | None = None, *, fallback_subdir: str = "plugin-data",
+) -> Path:
+    env = os.environ if environ is None else environ
+    if env.get("PLUGIN_DATA"):
+        return Path(env["PLUGIN_DATA"]).expanduser()
+    if env.get("ANTIGRAVITY_APP_DATA_DIR"):
+        return Path(env["ANTIGRAVITY_APP_DATA_DIR"]).expanduser() / "plugin_data" / "codex-orchestrator"
+    return Path("/tmp/codex-orchestrator") / fallback_subdir
+
+
 def ensure_private_dir(path: str | Path) -> Path:
     directory = Path(path)
     if directory.is_symlink():

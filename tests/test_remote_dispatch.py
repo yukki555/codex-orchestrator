@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import io
 import json
 import os
+import shlex
 import signal
 import stat
 import subprocess
@@ -25,6 +27,7 @@ SHIM = SCRIPTS / "remote_dispatch.sh"
 sys.path.insert(0, str(SCRIPTS))
 
 from codex_orch.remote.controller import RemoteController, main, resolve_cluster_path
+from codex_orch.remote.ssh_transport import RelayError, compute_file_sha256
 from codex_orch.remote.gpu_probe import REMOTE_PROBE_SCRIPT, build_probe_request, parse_probe_response, probe_host
 from codex_orch.remote.models import (
     AttemptProbeStatus, ClusterConfig, ConfigError, DispatchManifest, GpuSlotSnapshot, HostConfig,
@@ -151,6 +154,10 @@ class DispatchTests(unittest.TestCase):
         self.manifest = self.root / "manifest.json"
         self.clock = Clock()
         self.transport = FakeClusterTransport(self.clock)
+        env = patch.dict(os.environ, {"PLUGIN_DATA": str(self.root / "plugin"),
+                                     "CODEX_ORCH_DISABLE_DISPATCH_REGISTRY": "0"})
+        env.start()
+        self.addCleanup(env.stop)
         self.controller = RemoteController(
             transport=self.transport, clock=self.clock, sleeper=self.clock.advance,
             probe_fn=lambda transport, host, active: transport.probe(host, active),
@@ -186,6 +193,212 @@ class DispatchTests(unittest.TestCase):
                                 check=False, timeout=4)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result.stdout
+
+    def test_stop_cancels_only_confirmed_kills_and_blocks_dependents(self):
+        self.config([self.task("job", 100), self.task("child", depends_on=["job"])])
+        self.initialize()
+        self.tick()
+        with patch.object(self.transport, "kill_pgid", return_value=self.transport.result(False)):
+            failed = self.controller.stop(self.run_dir, kill_remote=True)
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["failed_kills"], ["job"])
+        self.assertEqual(failed["tasks"]["job"]["state"], "running")
+        stopped = self.controller.stop(self.run_dir, kill_remote=True)
+        self.assertTrue(stopped["ok"])
+        self.assertTrue(stopped["terminal"])
+        self.assertEqual(stopped["cancelled_tasks"], ["job"])
+        self.assertEqual(stopped["tasks"]["child"]["state"], "blocked_dep")
+        attempt = stopped["tasks"]["job"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["cancel_reason"], attempt["finished_at"]),
+                         ("cancelled", "stop_kill_remote", self.clock()))
+        event = next(row for row in map(json.loads, (self.run_dir / "events.jsonl").read_text().splitlines())
+                     if row["kind"] == "task_cancelled")
+        self.assertEqual(event["details"], {"attempt": 1, "reason": "stop_kill_remote"})
+
+    def test_table_sections_and_mutation_receipts(self):
+        self.config([self.task("job", 100)])
+        self.initialize()
+        self.tick()
+        for action in (("status",), ("cordon", "--host", "b")):
+            stdout = self.shim(*action, "--run-dir", self.run_dir, "--format", "table")
+            for text in ("task_counts", "\nHOSTS\n", "\nTASKS\n", "DRAINING_FOR", "ATTEMPTS"):
+                self.assertIn(text, stdout)
+            self.assertNotIn('"attempt_dir"', stdout)
+        receipt = self.controller.uncordon(self.run_dir, host_id="b")
+        self.assertEqual((receipt["ok"], receipt["action"], receipt["host_id"]), (True, "uncordon", "b"))
+        self.assertIn("hosts", receipt)
+        cancelled = self.controller.cancel(self.run_dir, task_id="job")
+        self.assertEqual((cancelled["action"], cancelled["cancelled_tasks"]), ("cancel", ["job"]))
+        stdout = self.shim("requeue", "--run-dir", self.run_dir, "--task", "job", "--format", "table")
+        self.assertIn("requeued_tasks", stdout)
+        self.assertIn("\nTASKS\n", stdout)
+        with patch("codex_orch.remote.controller.RemoteController", return_value=self.controller), \
+                patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(main(["plan", "--cluster", str(self.cluster), "--manifest", str(self.manifest),
+                                   "--live-probe", "--format", "table"]), 0)
+        for text in ("\nHOSTS / GPUS\n", "\nEXECUTION_ORDER\n", "MEM_MB", "EXT_BUSY"):
+            self.assertIn(text, stdout.getvalue())
+
+    def test_add_tasks_live_and_invalid_payloads_leave_run_files_unchanged(self):
+        self.config([self.task("completed"), self.task("cancelled", 100), self.task("live", 100)])
+        self.initialize()
+        self.tick()
+        self.tick(2)
+        self.controller.cancel(self.run_dir, task_id="cancelled")
+        payload = self.root / "additional.json"
+        payload.write_text(json.dumps([self.task("new-ready", depends_on=["completed"])]))
+        receipt = self.controller.add_tasks(self.run_dir, payload)
+        self.assertEqual((receipt["action"], receipt["added_tasks"]), ("add_tasks", ["new-ready"]))
+        self.assertEqual(receipt["tasks"]["new-ready"]["state"], "ready")
+        self.assertEqual(receipt["tasks"]["live"]["state"], "running")
+        payload.write_text(json.dumps({"tasks": [self.task("new-blocked", depends_on=["cancelled"]),
+                                                  self.task("new-pending", depends_on=["live"])]}))
+        receipt = json.loads(self.shim("add-tasks", "--run-dir", self.run_dir, "--tasks", payload))
+        self.assertEqual(receipt["added_tasks"], ["new-blocked", "new-pending"])
+        self.assertEqual(receipt["tasks"]["new-blocked"]["state"], "blocked_dep")
+        self.assertEqual(receipt["tasks"]["new-pending"]["state"], "pending")
+        self.assertEqual(stat.S_IMODE((self.run_dir / "manifest.snapshot.json").stat().st_mode), 0o600)
+        paths = [self.run_dir / name for name in ("manifest.snapshot.json", "state.json",
+                                                "summary.json", "events.jsonl")]
+        before = [path.read_bytes() for path in paths]
+        for invalid in ([self.task("live")], [self.task("x", depends_on=["y"]), self.task("y", depends_on=["x"])]):
+            payload.write_text(json.dumps(invalid))
+            self.assertFalse(json.loads(self.shim("add-tasks", "--run-dir", self.run_dir,
+                                                  "--tasks", payload, expected=2))["ok"])
+            self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertIn("new-ready", [row["task_id"] for row in self.tick()["dispatched"]])
+
+    def test_stall_watchdog_kills_then_settles_failure(self):
+        self.config([self.task("stall", 100, stall_timeout_s=5)])
+        self.initialize()
+        started = self.tick()["dispatched"][0]
+        killed = self.tick(6)["preempted"]
+        self.assertEqual([(row["reason"], row["pgid"]) for row in killed], [("stall_timeout", started["pgid"])])
+        task = self.status()["tasks"]["stall"]
+        self.assertEqual((task["state"], task["attempts"][0]["state"]), ("running", "cancelling"))
+        observed = [row for call in self.transport.calls if call[0] == "probe" for row in call[2]]
+        self.assertEqual(observed[-1]["gpu_ids"], started["gpu_ids"])
+        self.assertTrue(self.tick(1)["terminal"])
+        self.assertEqual(self.status()["tasks"]["stall"]["state"], "failed")
+        events = [json.loads(row) for row in (self.run_dir / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["details"]["reason"], "stall_timeout")
+
+    def test_cross_host_marker_precheck_unlocks_dependent_without_launch(self):
+        self.config([self.task("existing", done_markers=["done"]),
+                     self.task("ineligible", done_markers=["done"], allowed_hosts=["a"]),
+                     self.task("child", depends_on=["existing"])])
+        self.initialize()
+        requests = {}
+
+        def probe(transport, host, active, *, marker_checks):
+            requests[host.id] = marker_checks
+            result = transport.probe(host, active)
+            if host.id == "b":
+                result.existing_done_tasks = [check["task_id"] for check in marker_checks]
+            return result
+
+        self.controller.probe_fn = probe
+        dispatched = {row["task_id"] for row in self.tick()["dispatched"]}
+        self.assertEqual(requests["b"], [{"task_id": "existing",
+                                          "out_dir": "/remote/work/offline/outputs/existing",
+                                          "done_markers": ["done"]}])
+        self.assertEqual(dispatched, {"ineligible", "child"})
+        existing = self.status()["tasks"]["existing"]
+        self.assertEqual((existing["state"], existing["completed_host"], existing["attempts"]),
+                         ("completed", "b", []))
+
+    def _configure_relay(self, target_host):
+        self.config([
+            self.task("parent", allowed_hosts=["a"]),
+            self.task("child", allowed_hosts=[target_host], depends_on=["parent"],
+                      cmd="cat {dep.parent.out_dir}/model/data {inputs_dir}/model",
+                      retry_policy={"backoff_s": 1}, relay_inputs=[
+                          {"from_task": "parent", "rel_path": "model/data",
+                           "target_rel_path": "model", "max_bytes": 123},
+                      ]),
+            self.task("grandchild", depends_on=["child"]),
+        ], hosts={"a": self.host(work_root="/source"), "b": self.host("b", work_root="/target")})
+        self.initialize()
+        self.tick()
+
+    def test_relay_stages_target_paths_and_releases_state_lock(self):
+        for target in ("a", "b"):
+            with self.subTest(target=target):
+                self.run_dir = self.root / target
+                self.transport.attempts.clear()
+                self._configure_relay(target)
+                ready_states = []
+
+                def relay(src, src_path, dst, dst_path, *, local_cache_path, max_bytes):
+                    with (self.run_dir / "state.lock").open("rb") as handle:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    ready_states.append(self.status()["tasks"]["child"]["state"])
+                    self.assertEqual((src.id, dst.id, max_bytes), ("a", "b", 123))
+                    self.assertEqual(src_path, "/source/offline/outputs/parent/model/data")
+                    self.assertEqual(dst_path, "/target/offline/relay_cache/parent/model/data")
+                    self.assertEqual(local_cache_path, self.run_dir / "relay_cache/parent/model/data")
+                    return {"ok": True}
+
+                prior = len(self.transport.calls)
+                with patch.object(self.transport, "relay_file", create=True, side_effect=relay) as transfer, \
+                        patch.object(self.transport, "stage_local_input", create=True, return_value=True) as stage:
+                    child = self.tick(2)["dispatched"][0]
+                self.assertEqual(transfer.call_count, int(target == "b"))
+                self.assertEqual(ready_states, ["relaying"] if target == "b" else [])
+                self.assertEqual(child["task_id"], "child")
+                parent = "/target/offline/relay_cache/parent" if target == "b" else "/source/offline/outputs/parent"
+                inputs = f"{'/target' if target == 'b' else '/source'}/offline/inputs/child/model"
+                self.assertEqual(stage.call_args.args[1:], (f"{parent}/model/data", inputs))
+                calls = self.transport.calls[prior:]
+                self.assertIn(f"{parent}/model/data {inputs}", next(row[-1] for row in calls if row[0] == "launch"))
+                self.assertEqual(self.status()["tasks"]["child"]["state"], "running")
+                events = [json.loads(row) for row in (self.run_dir / "events.jsonl").read_text().splitlines()]
+                self.assertEqual([row["kind"] for row in events
+                                  if row["task_id"] == "child" and row["kind"] != "task_ready"],
+                                 ["relay_started", "relay_completed", "task_started"] if target == "b"
+                                 else ["task_started"])
+
+    def test_relay_failures_preserve_retry_policy_and_block_descendants(self):
+        for retryable in (False, True):
+            with self.subTest(retryable=retryable):
+                self.run_dir = self.root / str(retryable)
+                self.transport.attempts.clear()
+                self._configure_relay("b")
+                reason = "relay_source_unreachable" if retryable else "relay_exceeds_max_bytes"
+                error = RelayError("Relay failed.", reason=reason, retryable=retryable)
+                with patch.object(self.transport, "relay_file", create=True, side_effect=error):
+                    self.assertEqual(self.tick(2)["dispatched"], [])
+                status = self.status()
+                child = status["tasks"]["child"]
+                self.assertEqual(child["attempts"][0]["failure_kind"], "infra_error")
+                self.assertEqual(child["state"], "ready" if retryable else "failed")
+                self.assertEqual(status["tasks"]["grandchild"]["state"], "pending" if retryable else "blocked_dep")
+                if retryable:
+                    with patch.object(self.transport, "relay_file", create=True, return_value={"ok": True}), \
+                            patch.object(self.transport, "stage_local_input", create=True, return_value=True):
+                        self.assertEqual(self.tick(121)["dispatched"][0]["attempt"], 2)
+
+    def test_dispatch_registry_prunes_and_isolates_plugin_data(self):
+        self.config([self.task("job")])
+        plugin = Path(os.environ["PLUGIN_DATA"])
+        plugin.mkdir()
+        registry = plugin / "dispatch_runs.json"
+        old = self.root / "old"
+        old.mkdir()
+        registry.write_text(json.dumps({"runs": {
+            "old": {"run_dir": str(old), "terminal": True, "updated_at": 1},
+            "missing": {"run_dir": str(self.root / "missing"), "updated_at": 1},
+        }}))
+        self.initialize()
+        entries = json.loads(registry.read_text())["runs"]
+        self.assertEqual(list(entries), [str(self.run_dir.resolve())])
+        self.assertEqual(stat.S_IMODE(registry.stat().st_mode), 0o600)
+        self.assertEqual(entries[str(self.run_dir.resolve())]["task_counts"], {"ready": 1})
+        isolated = self.root / "isolated"
+        with patch.dict(os.environ, {"PLUGIN_DATA": str(isolated), "CODEX_ORCH_DISABLE_DISPATCH_REGISTRY": "1"}):
+            self.tick()
+            self.assertFalse(isolated.exists())
+        self.assertEqual(json.loads(registry.read_text())["runs"], entries)
 
     def test_schema_and_inventory(self):
         reference = SKILL / "references"
@@ -605,6 +818,60 @@ class LocalTransportTests(unittest.TestCase):
         manager = ControlSocketManager(self.root / "sockets")
         self.assertLess(len(os.fsencode(manager.control_path().replace("%C", "0" * 40))), 104)
         self.assertEqual(stat.S_IMODE(manager.sock_dir.stat().st_mode), 0o700)
+
+    def test_relay_hash_cache_resume_restart_and_limit(self):
+        def loopback(argv, **kwargs):
+            self.assertFalse(kwargs["shell"])
+            return subprocess.run(shlex.split(argv[-1]), **kwargs)
+
+        transport = SshTransport(socket_dir=self.root / "sockets", runner=loopback)
+        destination_host = HostConfig("b", "worker@b.example.invalid", str(self.root))
+        content = bytes(range(256)) * 400
+        digest = hashlib.sha256(content).hexdigest()
+        source = self.root / "source data"
+        source.write_bytes(content)
+        cache = self.root / "cache/local"
+        cache.parent.mkdir()
+        target = self.root / "remote/destination"
+        remote_part = target.with_suffix(".part")
+        local_part = cache.with_suffix(".part")
+
+        def transfer(**kwargs):
+            return transport.relay_file(self.host, str(source), destination_host, str(target),
+                                        local_cache_path=cache, **kwargs)
+
+        def assert_transfer(downloaded, uploaded, *, hit=False):
+            self.assertEqual(transfer(), {"ok": True, "cache_hit": hit, "size": len(content), "sha256": digest,
+                                          "downloaded_bytes": downloaded, "uploaded_bytes": uploaded})
+            self.assertEqual(compute_file_sha256(target), digest)
+            self.assertFalse(remote_part.exists())
+
+        assert_transfer(len(content), len(content))
+        self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(cache.parent.stat().st_mode), 0o700)
+        assert_transfer(0, 0, hit=True)
+        staged = self.root / "inputs/staged"
+        self.assertTrue(transport.stage_local_input(destination_host, str(target), str(staged)))
+        self.assertEqual(staged.read_bytes(), content)
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                target.unlink()
+                cache.unlink()
+                local_part.write_bytes(content[:701] if valid else b"x" * 701)
+                remote_part.write_bytes(content[:999] if valid else b"x" * 999)
+                assert_transfer(len(content) - (701 if valid else 0), len(content) - (999 if valid else 0))
+                self.assertFalse(local_part.exists())
+        target.write_bytes(b"x" * len(content))
+        assert_transfer(0, len(content))
+        with self.assertRaises(RelayError) as exceeded:
+            transfer(max_bytes=len(content) - 1)
+        self.assertEqual((exceeded.exception.reason, exceeded.exception.retryable),
+                         ("relay_exceeds_max_bytes", False))
+        source.unlink()
+        source.mkdir()
+        with self.assertRaises(RelayError) as missing:
+            transfer()
+        self.assertEqual((missing.exception.reason, missing.exception.retryable), ("relay_missing_source", False))
 
     @staticmethod
     def archive(entries):

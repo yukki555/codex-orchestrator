@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import errno
 import json
+import math
 import os
 import re
 import subprocess
 import tempfile
 import uuid
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from http.client import HTTPException
 from pathlib import Path
@@ -23,7 +26,8 @@ from .context_telemetry import (
     save_conversation_state,
     update_conversation_state,
 )
-from .env import build_child_env, ensure_private_dir, redact_secrets
+from .env import build_child_env, ensure_private_dir, plugin_data_dir, redact_secrets
+from .remote.models import TERMINAL_TASK_STATES
 
 _HANDOFFS = Path("/tmp/codex-orchestrator/handoffs")
 _SERVICE = "product.v1.ConversationService"
@@ -341,7 +345,100 @@ def _brain_dir(conversation_id, app_data_dir):
     return None
 
 
-def collect_runtime_snapshot(*, workspaces=(), artifact_dirs=(), conversation_id="", app_data_dir="") -> dict:
+def _dispatch_json(path):
+    try:
+        return _object(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return {}
+
+
+def collect_dispatch_runs_snapshot(
+    *, dispatch_run_dirs: Sequence[str | Path] = (), app_data_dir: str = "",
+    environ: Mapping[str, str] | None = None, max_entries: int = 8,
+) -> list[dict]:
+    env = os.environ if environ is None else environ
+    entries = {}
+    if env.get("PLUGIN_DATA") or app_data_dir or env.get("ANTIGRAVITY_APP_DATA_DIR"):
+        context = {**env, "ANTIGRAVITY_APP_DATA_DIR": app_data_dir} if app_data_dir else env
+        registry = _dispatch_json(plugin_data_dir(context) / "dispatch_runs.json")
+        for entry in _object(registry.get("runs")).values():
+            if isinstance(entry, dict) and isinstance(entry.get("run_dir"), str) and entry["run_dir"]:
+                try:
+                    path = Path(entry["run_dir"]).expanduser().resolve()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                entries[path] = entry
+    explicit = {Path(path).expanduser().resolve() for path in dispatch_run_dirs}
+    candidates = explicit | {path for path, entry in entries.items() if not entry.get("terminal")}
+    runs = []
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        entry = entries.get(path, {})
+        summary_path = path / "summary.json"
+        summary = _dispatch_json(summary_path)
+        if not summary:
+            summary_path = path / "state.json"
+            summary = _dispatch_json(summary_path)
+        if not summary and not summary_path.is_file() and not (path / "summary.json").is_file():
+            continue
+        counts = {key: value for key, value in _object(summary.get("task_counts")).items()
+                  if type(value) is int and value >= 0}
+        if "task_counts" not in summary:
+            counts = dict(Counter(
+                task["state"] for task in _object(summary.get("tasks")).values()
+                if isinstance(task, dict) and isinstance(task.get("state"), str)
+            ))
+        terminal = summary.get("terminal", all(key in TERMINAL_TASK_STATES for key in counts)
+                               if "tasks" in summary else entry.get("terminal", False))
+        if terminal and path not in explicit:
+            continue
+        pid = summary.get("controller_pid", entry.get("controller_pid"))
+        if "controller_pid" not in summary:
+            try:
+                pid = int((path / "controller.pid").read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                pass
+        alive = False
+        if type(pid) is int and pid > 1:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except PermissionError:
+                alive = True
+            except (OSError, OverflowError):
+                pass
+        else:
+            pid = None
+        hosts = {}
+        for host_id, host in _object(summary.get("host_gpu_summary", summary.get("hosts"))).items():
+            if isinstance(host, dict):
+                hosts[host_id] = {
+                    key: host.get(key) if isinstance(host.get(key), str) else None
+                    for key in ("state", "draining_for")
+                }
+                for key in ("free_gpu_ids", "leased_gpu_ids"):
+                    ids = host.get(key)
+                    hosts[host_id][key] = [gpu for gpu in ids if type(gpu) is int] if isinstance(ids, list) else []
+        updated = summary.get("updated_at", entry.get("updated_at"))
+        if type(updated) not in (float, int) or (type(updated) is float and not math.isfinite(updated)):
+            try:
+                updated = summary_path.stat().st_mtime
+            except OSError:
+                updated = 0
+        run_id = summary.get("run_id", entry.get("run_id"))
+        runs.append(dict(
+            run_id=run_id if isinstance(run_id, str) else path.name, run_dir=str(path),
+            controller_pid=pid, controller_alive=alive, terminal=bool(terminal),
+            task_counts=counts, hosts=hosts, updated_at=updated,
+        ))
+    runs.sort(key=lambda run: (run["terminal"], -run["updated_at"], run["run_id"], run["run_dir"]))
+    return _safe_data(runs[:max(0, max_entries)], env)
+
+
+def collect_runtime_snapshot(
+    *, workspaces=(), artifact_dirs=(), conversation_id="", app_data_dir="", dispatch_run_dirs=(), environ=None,
+) -> dict:
     """Collect path-sorted local evidence for the runtime snapshot."""
     workspace_paths = sorted({Path(path).expanduser().resolve() for path in workspaces})
     artifact_paths = sorted({Path(path).expanduser().resolve() for path in artifact_dirs})
@@ -355,8 +452,11 @@ def collect_runtime_snapshot(*, workspaces=(), artifact_dirs=(), conversation_id
         "workspaces": [_workspace_snapshot(path) for path in workspace_paths],
         "artifact_dirs": [_artifact_snapshot(path) for path in artifact_paths],
         "conversation_artifacts": conversation_artifacts,
+        "dispatch_runs": collect_dispatch_runs_snapshot(
+            dispatch_run_dirs=dispatch_run_dirs, app_data_dir=app_data_dir, environ=environ,
+        ),
     }
-    return _safe_data(snapshot, os.environ)
+    return _safe_data(snapshot, os.environ if environ is None else environ)
 
 
 def normalize_handoff_title(raw_title: str, hop_index: int) -> str:
@@ -658,7 +758,7 @@ def _create(args, environ, packet_text, cid):
     model = (explicit if explicit.lower() != "auto" else "") or cfg["model_override"] or telemetry.active_model or "pro"
     snapshot = collect_runtime_snapshot(
         workspaces=args.workspace, artifact_dirs=args.artifact_dir, conversation_id=cid,
-        app_data_dir=_app_data_dir(environ),
+        app_data_dir=_app_data_dir(environ), dispatch_run_dirs=args.dispatch_run_dir, environ=environ,
     )
     assessment = evaluate_context_band(telemetry, cfg, model_hint=model)
     manifest = {
@@ -815,6 +915,7 @@ def _parser():
         command.add_argument("--workspace", action="append", default=[])
         command.add_argument("--artifact-dir", action="append", default=[])
     create.add_argument("--title")
+    create.add_argument("--dispatch-run-dir", action="append", default=[])
     create.add_argument("--resume-mode", choices=("auto", "pause"), default="pause")
     create.add_argument("--archive-old", action="store_true")
     create.add_argument("--max-hops", type=int)

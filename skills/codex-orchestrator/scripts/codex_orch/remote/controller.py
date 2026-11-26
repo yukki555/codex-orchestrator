@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import heapq
+import inspect
 import json
 import math
 import os
@@ -20,20 +21,24 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from ..env import ensure_private_dir, redact_secrets
+from ..env import ensure_private_dir, plugin_data_dir, redact_secrets
 from .gpu_probe import probe_host
 from .models import (
     TERMINAL_TASK_STATES, ClusterConfig, DispatchManifest, HostConfig, HostProbeSnapshot,
-    RunState, TaskSpec, ValidationError, host_matches_task_static,
-    load_cluster_config, load_dispatch_manifest, render_task_command,
+    RunState, TaskRuntime, TaskSpec, ValidationError, host_matches_task_static,
+    load_and_merge_additional_tasks, load_cluster_config, load_dispatch_manifest, render_task_command,
     validate_manifest_against_cluster,
 )
 from .scheduler import (
     PreemptAction, PullAction, SchedulerEvent, _downstream_counts, _finish_failure, advance_dag_states,
     build_summary, compute_free_gpus, init_run_state, is_run_terminal,
     mark_dispatch_launch_failed, mark_dispatch_started, plan_dispatches, reconcile_host_probe,
+    mark_relay_failed, mark_task_relaying, needs_cross_host_relay,
 )
-from .ssh_transport import SshTransport
+from .ssh_transport import RelayError, SshTransport
+
+
+_WATCHDOG_REASONS = ("timeout", "stall_timeout")
 
 
 def resolve_cluster_path(explicit: str | None) -> Path:
@@ -97,10 +102,49 @@ def _append_events(run_dir: Path, events: Sequence[SchedulerEvent]) -> None:
     fd = os.open(run_dir / "events.jsonl", os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         os.fchmod(handle.fileno(), 0o600)
-        for event in events:
-            handle.write(json.dumps(_redact(event.to_dict()), allow_nan=False) + "\n")
+        handle.write(_event_records(events))
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _event_records(events: Sequence[SchedulerEvent]) -> str:
+    return "".join(json.dumps(_redact(event.to_dict()), allow_nan=False) + "\n" for event in events)
+
+
+def _update_dispatch_registry(run_dir: Path, summary: dict[str, Any]) -> None:
+    if os.environ.get("CODEX_ORCH_DISABLE_DISPATCH_REGISTRY") == "1":
+        return
+    try:
+        directory = ensure_private_dir(plugin_data_dir())
+        path = directory / "dispatch_runs.json"
+        with _locked(directory, "dispatch_runs.lock"):
+            try:
+                data = _read_json(path)
+            except (FileNotFoundError, ValueError):
+                data = {}
+            entries = data.get("runs", {}) if isinstance(data, dict) else {}
+            now = time.time()
+            runs = {}
+            if isinstance(entries, dict):
+                for key, entry in entries.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    directory_name = entry.get("run_dir")
+                    updated_at = entry.get("updated_at")
+                    if (not isinstance(directory_name, str) or not Path(directory_name).is_dir()
+                            or type(updated_at) not in (int, float) or not math.isfinite(updated_at)
+                            or (entry.get("terminal") is True and updated_at < now - 7 * 86400)):
+                        continue
+                    runs[key] = entry
+            resolved = str(run_dir.resolve())
+            runs[resolved] = {key: summary[key] for key in (
+                "run_id", "controller_pid", "terminal", "task_counts",
+            )}
+            runs[resolved].update(run_dir=resolved, updated_at=now)
+            recent = sorted(runs, key=lambda key: runs[key]["updated_at"], reverse=True)[:32]
+            _write_json(path, {"version": "1", "runs": {key: runs[key] for key in recent}})
+    except (OSError, RuntimeError, ValueError, OverflowError):
+        pass
 
 
 def _pid(run_dir: Path) -> int | None:
@@ -243,13 +287,22 @@ class RemoteController:
             result["host_gpu_summary"] = {snapshot.host_id: snapshot.to_dict() for snapshot in snapshots}
         return result
 
-    def _probe(self, cluster, attempts) -> list[HostProbeSnapshot]:
+    def _probe(self, cluster, attempts, *, marker_checks=None) -> list[HostProbeSnapshot]:
         if not attempts:
             return []
         transport = self.transport
+        accepts_checks = False
+        if marker_checks is not None:
+            try:
+                inspect.signature(self.probe_fn).bind(transport, None, [], marker_checks=[])
+            except (TypeError, ValueError):
+                pass
+            else:
+                accepts_checks = True
         with ThreadPoolExecutor(max_workers=min(16, len(attempts))) as pool:
             futures = [
-                pool.submit(self.probe_fn, transport, cluster.hosts[host_id], active)
+                pool.submit(self.probe_fn, transport, cluster.hosts[host_id], active,
+                            **({"marker_checks": marker_checks[host_id]} if accepts_checks else {}))
                 for host_id, active in sorted(attempts.items())
             ]
             return [future.result() for future in futures]
@@ -274,6 +327,7 @@ class RemoteController:
             leased = {gpu for _, _, attempt in _attempts_on(state, host_id) for gpu in attempt.gpu_ids}
             hosts[host_id] = {
                 **observed.get(host_id, {}), "state": runtime.state, "preflight_ok": runtime.preflight_ok,
+                "draining_for": runtime.draining_for,
                 "gpus": [gpu.to_dict() for gpu in runtime.gpus], "leased_gpu_ids": sorted(leased),
                 "free_gpu_ids": (
                     compute_free_gpus(cluster.hosts[host_id], runtime, leased, self.clock())
@@ -284,6 +338,7 @@ class RemoteController:
         summary.update(updated_at=self.clock(), controller_pid=pid, controller_alive=_alive(pid),
                        pulled_tasks=pulled_tasks, host_gpu_summary=hosts, run_dir=str(run_dir))
         _write_json(run_dir / "summary.json", summary)
+        _update_dispatch_registry(run_dir, summary)
         return summary
 
     def _persist(self, run_dir, cluster, state, events, *, probes=()) -> dict[str, Any]:
@@ -374,9 +429,18 @@ class RemoteController:
             cluster, manifest, state = _load_run(run_dir)
             tasks = {task.id: task for task in manifest.tasks}
             now = self.clock()
+            # With dispatch.lock held, a persisted relay can only belong to an interrupted tick.
+            recovered = []
+            for task_id, runtime in state.tasks.items():
+                if runtime.state == "relaying":
+                    runtime.state = "ready"
+                    recovered.append(SchedulerEvent(now, "relay_interrupted", task_id))
+            if recovered:
+                self._persist(run_dir, cluster, state, recovered)
             requests = {
                 host_id: [
                     {"task_id": task_id, "attempt": attempt.attempt, "pgid": attempt.pgid,
+                     "gpu_ids": list(attempt.gpu_ids),
                      "attempt_dir": attempt.attempt_dir, "out_dir": attempt.out_dir,
                      "done_markers": list(tasks[task_id].done_markers)}
                     for task_id, _, attempt in _attempts_on(state, host_id)
@@ -384,8 +448,18 @@ class RemoteController:
                 for host_id, runtime in state.hosts.items()
                 if runtime.preflight_ok and (force_probe or runtime.next_probe_at <= now)
             }
+            marker_checks = {}
+            for host_id in requests:
+                host = cluster.hosts[host_id]
+                marker_checks[host_id] = [
+                    {"task_id": task.id, "done_markers": list(task.done_markers),
+                     "out_dir": f"{host.work_root.rstrip('/')}/{state.run_id}/outputs/{task.id}"}
+                    for task in manifest.tasks
+                    if state.tasks[task.id].state == "ready" and task.done_markers
+                    and not state.tasks[task.id].attempts and host_matches_task_static(host, task)[0]
+                ]
 
-        snapshots = self._probe(cluster, requests)
+        snapshots = self._probe(cluster, requests, marker_checks=marker_checks)
         pulls, preempts, events = [], [], []
         with _locked(run_dir):
             state = _load_state(run_dir)
@@ -396,7 +470,7 @@ class RemoteController:
             for snapshot in snapshots:
                 kills, transfers, changes = reconcile_host_probe(state, cluster, tasks, snapshot, now)
                 for event in changes:
-                    if event.kind == "task_completed":
+                    if event.kind == "task_completed" and not event.details.get("prechecked"):
                         payload = snapshot.attempts[event.task_id].done_payload
                         event.details["skipped_existing"] = bool(payload.get("skipped_existing"))
                         state.tasks[event.task_id].attempts[-1].failure_kind = None
@@ -414,7 +488,7 @@ class RemoteController:
                 events.extend(changes)
             pending = {}
             for action in preempts:
-                if action.reason == "timeout":
+                if action.reason in _WATCHDOG_REASONS:
                     continue
                 # Keep the lease until SSH confirms the kill. Persist the intended transition
                 # only after that confirmation so a failed kill cannot duplicate a task.
@@ -438,9 +512,9 @@ class RemoteController:
             now = self.clock()
             for action in preempts:
                 if action.task_id in failed_kills:
-                    if action.reason == "timeout":
+                    if action.reason in _WATCHDOG_REASONS:
                         state.tasks[action.task_id].active_attempt.state = "running"
-                elif action.reason != "timeout":
+                elif action.reason not in _WATCHDOG_REASONS:
                     state.tasks[action.task_id] = pending[action.task_id]
                     kill_events.append(deferred[action.task_id])
             # The scheduler records an outage after three failures. Only dispatch to
@@ -452,8 +526,6 @@ class RemoteController:
             assignments, changes = plan_dispatches(state, cluster, tasks, state.run_id, now)
             for host, preflight_ok in zip(unavailable, saved):
                 host.preflight_ok = preflight_ok
-            dep_dirs = {task_id: runtime.completed_out_dir for task_id, runtime in state.tasks.items()
-                        if runtime.completed_out_dir is not None}
             self._persist(run_dir, cluster, state, kill_events + changes)
 
         dispatched = []
@@ -462,13 +534,74 @@ class RemoteController:
                 break
             host = cluster.hosts[assignment.host_id]
             task = tasks[assignment.task_id]
+            run_root = f"{host.work_root.rstrip('/')}/{state.run_id}"
+            inputs_dir = f"{run_root}/inputs/{task.id}"
+            dep_dirs = {dep: state.tasks[dep].completed_out_dir for dep in task.depends_on
+                        if state.tasks[dep].completed_out_dir is not None}
+            cross_relays = needs_cross_host_relay(state, task, host.id)
+            if cross_relays:
+                with _locked(run_dir):
+                    state = _load_state(run_dir)
+                    changes = mark_task_relaying(state, assignment, self.clock())
+                    self._persist(run_dir, cluster, state, changes)
+                try:
+                    for relay in cross_relays:
+                        dep = state.tasks[relay.from_task]
+                        src_path = f"{dep.completed_out_dir.rstrip('/')}/{relay.rel_path}"
+                        cache_dir = f"{run_root}/relay_cache/{relay.from_task}"
+                        dst_path = f"{cache_dir}/{relay.rel_path}"
+                        self.transport.relay_file(
+                            cluster.hosts[dep.completed_host], src_path, host, dst_path,
+                            local_cache_path=run_dir / "relay_cache" / relay.from_task / relay.rel_path,
+                            max_bytes=relay.max_bytes,
+                        )
+                        dep_dirs[relay.from_task] = cache_dir
+                        if relay.target_rel_path and not self.transport.stage_local_input(
+                            host, dst_path, f"{inputs_dir}/{relay.target_rel_path}",
+                        ):
+                            raise RelayError("Could not stage the relayed input.",
+                                             reason="relay_stage_failed", retryable=True)
+                except Exception as exc:
+                    reason = exc.reason if isinstance(exc, RelayError) else "relay_transport_error"
+                    retryable = exc.retryable if isinstance(exc, RelayError) else True
+                    with _locked(run_dir):
+                        state = _load_state(run_dir)
+                        changes = mark_relay_failed(
+                            state, manifest, assignment, reason, self.clock(), retryable=retryable,
+                        )
+                        self._persist(run_dir, cluster, state, changes)
+                    continue
+                with _locked(run_dir):
+                    _append_events(run_dir, [SchedulerEvent(
+                        self.clock(), "relay_completed", task.id, host.id,
+                        {"attempt": assignment.attempt, "files": len(cross_relays)},
+                    )])
             options = dict(run_id=state.run_id, out_dir=assignment.out_dir,
                            attempt_dir=assignment.attempt_dir, gpu_ids=assignment.gpu_ids)
             try:
-                command = render_task_command(task, host, dep_out_dirs=dep_dirs, **options)
-            except ValidationError as exc:
+                for relay in task.relay_inputs:
+                    dep = state.tasks[relay.from_task]
+                    if dep.completed_host == host.id and relay.target_rel_path:
+                        src_path = f"{dep.completed_out_dir.rstrip('/')}/{relay.rel_path}"
+                        if not self.transport.stage_local_input(
+                            host, src_path, f"{inputs_dir}/{relay.target_rel_path}",
+                        ):
+                            raise ValidationError("Could not stage the same-host input.")
+                command = render_task_command(
+                    task, host, dep_out_dirs=dep_dirs, inputs_dir=inputs_dir, **options,
+                )
+            except Exception as exc:
                 ok, pgid, reason = False, None, str(exc)
             else:
+                if self._interrupted or (run_dir / "stop.flag").exists():
+                    if cross_relays:
+                        with _locked(run_dir):
+                            state = _load_state(run_dir)
+                            state.tasks[task.id].state = "ready"
+                            self._persist(run_dir, cluster, state, [
+                                SchedulerEvent(self.clock(), "relay_interrupted", task.id, host.id),
+                            ])
+                    break
                 ok, pgid, reason = self.transport.launch_detached(
                     host, task=task, rendered_cmd=command, **options,
                 )
@@ -680,6 +813,7 @@ class RemoteController:
 
     def _cordon(self, run_dir, host_id, gpu, cordoned, preempt, reason):
         run_dir = _existing_run(run_dir)
+        receipt = {"action": "cordon" if cordoned else "uncordon", "host_id": host_id}
         with _locked(run_dir, "dispatch.lock"):
             with _locked(run_dir):
                 cluster, manifest, state = _load_run(run_dir)
@@ -705,7 +839,7 @@ class RemoteController:
                     if preempt and (gpu is None or gpu in attempt.gpu_ids)
                 }
             if not affected:
-                return summary
+                return {**summary, **receipt, "ok": True}
             actions = [PreemptAction(task_id, a.attempt, host_id, a.pgid, a.gpu_ids, reason)
                        for task_id, a in affected.items()]
             events, failed = self._kill(cluster, actions)
@@ -723,7 +857,7 @@ class RemoteController:
                     events.append(SchedulerEvent(now, "task_preempted", task_id, host_id,
                                                  {"reason": reason, "attempt": attempt.attempt}))
                 summary = self._persist(run_dir, cluster, state, events)
-            return {**summary, "ok": not failed, "failed_kills": sorted(failed)}
+            return {**summary, **receipt, "ok": not failed, "failed_kills": sorted(failed)}
 
     def cordon(
         self, run_dir: Path, *, host_id: str, gpu: int | None = None, preempt: bool = False,
@@ -748,6 +882,7 @@ class RemoteController:
                 raise ValidationError(f"Task is unknown or cannot be requeued: {task_id}")
             now = self.clock()
             events = []
+            requeued = []
             for tid, runtime in state.tasks.items():
                 if runtime.state not in eligible or (task_id is not None and tid != task_id):
                     continue
@@ -756,9 +891,30 @@ class RemoteController:
                 runtime.retries_used = runtime.infra_retries_used = runtime.preempt_retries_used = 0
                 if clear_infra_cooldown:
                     runtime.failed_infra_hosts.clear()
+                requeued.append(tid)
                 events.append(SchedulerEvent(now, "task_requeued", tid, details={"reason": "operator_requeue"}))
             events.extend(advance_dag_states(state, {task.id: task for task in manifest.tasks}, now))
-            return self._persist(run_dir, cluster, state, events)
+            summary = self._persist(run_dir, cluster, state, events)
+            return {**summary, "ok": True, "action": "requeue", "requeued_tasks": sorted(requeued)}
+
+    def add_tasks(self, run_dir: Path, tasks_path: Path) -> dict[str, Any]:
+        run_dir = _existing_run(run_dir)
+        with _locked(run_dir, "dispatch.lock"), _locked(run_dir):
+            cluster, manifest, state = _load_run(run_dir)
+            combined, new_tasks = load_and_merge_additional_tasks(manifest, tasks_path, cluster)
+            added = [task.id for task in new_tasks]
+            for task_id in added:
+                state.tasks[task_id] = TaskRuntime()
+            now = self.clock()
+            events = advance_dag_states(state, {task.id: task for task in combined.tasks}, now)
+            events.append(SchedulerEvent(now, "tasks_added", details={"task_ids": added}))
+            event_path = run_dir / "events.jsonl"
+            event_log = event_path.read_text(encoding="utf-8") if event_path.exists() else ""
+            _write_json(run_dir / "manifest.snapshot.json", combined.to_dict())
+            _write_json(run_dir / "state.json", state.to_dict())
+            _atomic_text(event_path, event_log + _event_records(events))
+            summary = self._summary(run_dir, cluster, state)
+            return {**summary, "ok": True, "action": "add_tasks", "added_tasks": added}
 
     def cancel(
         self, run_dir: Path, *, task_id: str | None = None, cancel_all: bool = False,
@@ -791,7 +947,8 @@ class RemoteController:
                     events.append(SchedulerEvent(now, "task_cancelled", tid))
                 events.extend(advance_dag_states(state, {task.id: task for task in manifest.tasks}, now))
                 summary = self._persist(run_dir, cluster, state, events)
-            return {**summary, "ok": not failed, "failed_kills": sorted(failed)}
+            return {**summary, "ok": not failed, "failed_kills": sorted(failed), "action": "cancel",
+                    "cancelled_tasks": sorted(selected.keys() - failed)}
 
     def pull(
         self, run_dir: Path, *, task_id: str | None = None, dest: Path | None = None,
@@ -837,18 +994,43 @@ class RemoteController:
                 break
             self.sleeper(0.5)
         failed = set()
+        cancelled = []
         if kill_remote:
             with _locked(run_dir, "dispatch.lock"):
                 with _locked(run_dir):
-                    state = _load_state(run_dir)
+                    cluster, manifest, state = _load_run(run_dir)
                     actions = [PreemptAction(tid, a.attempt, host_id, a.pgid, a.gpu_ids, "operator_stop")
                                for host_id in state.hosts for tid, _, a in _attempts_on(state, host_id)]
                 events, failed = self._kill(cluster, actions)
                 with _locked(run_dir):
-                    self._persist(run_dir, cluster, _load_state(run_dir), events)
+                    state = _load_state(run_dir)
+                    now = self.clock()
+                    for action in actions:
+                        if action.task_id in failed:
+                            continue
+                        runtime = state.tasks[action.task_id]
+                        attempt = runtime.active_attempt
+                        if attempt is None or attempt.attempt != action.attempt:
+                            continue
+                        if type(action.pgid) is not int or action.pgid <= 1:
+                            failed.add(action.task_id)
+                            continue
+                        attempt.state = runtime.state = "cancelled"
+                        attempt.finished_at = now
+                        attempt.cancel_reason = "stop_kill_remote"
+                        cancelled.append(action.task_id)
+                        events.append(SchedulerEvent(
+                            now, "task_cancelled", action.task_id, attempt.host_id,
+                            {"attempt": attempt.attempt, "reason": "stop_kill_remote"},
+                        ))
+                    events.extend(advance_dag_states(state, {task.id: task for task in manifest.tasks}, now))
+                    summary = self._persist(run_dir, cluster, state, events)
+            return {**summary, "ok": not failed, "failed_kills": sorted(failed),
+                    "cancelled_tasks": sorted(cancelled)}
         summary = self.status(run_dir)
+        _update_dispatch_registry(run_dir, summary)
         return {**summary, "ok": not failed and not summary["controller_alive"],
-                "failed_kills": sorted(failed)}
+                "failed_kills": sorted(failed), "cancelled_tasks": []}
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -861,7 +1043,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", choices=("json", "table"), default="json")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("validate", "plan", "start", "run", "tick", "status", "cordon", "uncordon",
-                 "requeue", "cancel", "pull", "stop"):
+                 "requeue", "cancel", "add-tasks", "pull", "stop"):
         command = commands.add_parser(name)
         command.add_argument("--format", choices=("json", "table"), default=argparse.SUPPRESS)
         if name in ("validate", "plan", "start"):
@@ -901,7 +1083,17 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--dest", type=Path)
         elif name == "stop":
             command.add_argument("--kill-remote", action="store_true")
+        elif name == "add-tasks":
+            command.add_argument("--tasks", dest="tasks_path", type=Path, required=True)
     return parser
+
+
+def _table(title, columns, rows) -> None:
+    print(f"\n{title}")
+    cells = [columns, *[tuple("-" if item is None else str(item) for item in row) for row in rows]]
+    widths = [max(map(len, column)) for column in zip(*cells)]
+    for row in cells:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
 
 
 def _emit(result: dict[str, Any], output_format: str) -> None:
@@ -914,10 +1106,41 @@ def _emit(result: dict[str, Any], output_format: str) -> None:
         encoded = json.dumps(result, separators=(",", ":"))
     if output_format == "json":
         print(encoded)
-    else:
-        print(f"{'FIELD':<24} VALUE")
-        for key, value in result.items():
+        return
+
+    hosts = result.get("host_gpu_summary")
+    live_plan = hosts is not None and "execution_order" in result
+    status = hosts is not None and not live_plan and isinstance(result.get("tasks"), dict)
+    sections = {"host_gpu_summary", "execution_order"} if live_plan else set()
+    if status:
+        sections.update(("hosts", "host_gpu_summary", "tasks", "pulled_tasks"))
+    print(f"{'FIELD':<24} VALUE")
+    for key, value in result.items():
+        if key not in sections:
             print(f"{key:<24} {json.dumps(value, ensure_ascii=True)}")
+    if live_plan:
+        _table("HOSTS / GPUS", ("HOST", "OK", "DISK_GB", "GPU", "MEM_MB", "UTIL%", "EXT_BUSY"), [
+            (host_id, host.get("ok"), host.get("disk_free_gb"), gpu.get("index"),
+             f"{gpu['memory_used_mb']}/{gpu['memory_total_mb']}" if gpu else None,
+             gpu.get("utilization_pct"), gpu.get("external_busy"))
+            for host_id, host in sorted(hosts.items()) for gpu in (host.get("gpus") or [{}])
+        ])
+        _table("EXECUTION_ORDER", ("TASK_ID",), [(tid,) for tid in result["execution_order"]])
+    if status:
+        _table("HOSTS", ("HOST", "STATE", "FREE", "LEASED", "DISK_GB", "DRAINING_FOR"), [
+            (host_id, host["state"], ",".join(map(str, host["free_gpu_ids"])) or "-",
+             ",".join(map(str, host["leased_gpu_ids"])) or "-", host.get("disk_free_gb"),
+             host.get("draining_for"))
+            for host_id, host in sorted(hosts.items())
+        ])
+        rows = []
+        for task_id, task in sorted(result["tasks"].items()):
+            attempts = task["attempts"]
+            last = attempts[-1] if attempts else {}
+            rows.append((task_id, task["state"], task.get("completed_host") or last.get("host_id"),
+                         ",".join(map(str, last.get("gpu_ids", []))) or "-", len(attempts),
+                         last.get("exit_code"), last.get("failure_kind") or last.get("cancel_reason")))
+        _table("TASKS", ("TASK_ID", "STATE", "HOST", "GPUS", "ATTEMPTS", "EXIT", "FAILURE"), rows)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -936,7 +1159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if command == "run":
             return controller.run_loop(**args)
         method = {"start": controller._start, "tick": controller.run_tick}.get(command)
-        result = (method or getattr(controller, command))(**args)
+        result = (method or getattr(controller, command.replace("-", "_")))(**args)
         _emit(result, output_format)
         return result.get("exit_code", 0 if result.get("ok", True) else 1)
     except ValidationError as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -20,6 +21,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from ..env import ensure_private_dir, redact_secrets
 from .models import HostConfig, TaskSpec
@@ -33,6 +35,130 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MUX_ERRORS = ("ControlSocket", "mux_client", "Broken pipe")
 _MIB = 1024 * 1024
 _CHUNK_SIZE = 64 * 1024
+DEFAULT_RELAY_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+
+class RelayError(RuntimeError):
+    def __init__(self, message: str, *, reason: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.retryable = retryable
+
+
+def compute_file_sha256(path: Path, limit: int | None = None) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        remaining = limit
+        while remaining is None or remaining > 0:
+            data = handle.read(_CHUNK_SIZE if remaining is None else min(_CHUNK_SIZE, remaining))
+            if not data:
+                break
+            digest.update(data)
+            if remaining is not None:
+                remaining -= len(data)
+    return digest.hexdigest()
+
+
+_RELAY_REMOTE = r"""
+import hashlib, json, os, shutil, stat, sys, tempfile
+from pathlib import Path
+
+CHUNK = 64 * 1024
+
+def sha256(handle, remaining):
+    digest = hashlib.sha256()
+    while remaining:
+        chunk = handle.read(min(CHUNK, remaining))
+        if not chunk:
+            break
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+def metadata(path, cap, *, expected=None, prefix=None):
+    result = dict(exists=path.exists(), is_file=path.is_file(), size=0, sha256="")
+    if result["is_file"]:
+        with regular_reader(path) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            result["size"] = size
+            if size <= cap and (expected is None or expected == size):
+                result["sha256"] = sha256(handle, size if prefix is None else prefix)
+    return result
+
+def regular_reader(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError("Expected a regular input file")
+    return os.fdopen(fd, "rb")
+
+mode, name, *args = sys.argv[1:]
+path = Path(name)
+if mode == "source":
+    print(json.dumps(metadata(path, int(args[0]))))
+elif mode == "prefix":
+    with regular_reader(path) as handle:
+        print(json.dumps({"sha256": sha256(handle, int(args[0]))}))
+elif mode == "target":
+    size, expected_hash = int(args[0]), args[1]
+    target = metadata(path, size, expected=size)
+    if target["sha256"] != expected_hash:
+        target["part"] = metadata(Path(name + ".part"), size)
+    print(json.dumps(target))
+elif mode == "download":
+    offset, limit = map(int, args)
+    with regular_reader(path) as source:
+        source.seek(offset)
+        while True:
+            data = source.read(min(CHUNK, limit - offset + 1))
+            if not data:
+                break
+            offset += len(data)
+            if offset > limit:
+                sys.exit(42)
+            sys.stdout.buffer.write(data)
+elif mode == "upload":
+    offset, size, expected_hash = int(args[0]), int(args[1]), args[2]
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    part = Path(name + ".part")
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+    if not offset:
+        flags |= os.O_CREAT
+    fd = os.open(part, flags, 0o600)
+    with os.fdopen(fd, "r+b") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("Expected a regular staging file")
+        os.fchmod(fd, 0o600)
+        handle.truncate(offset)
+        handle.seek(offset)
+        remaining = size - offset
+        while remaining:
+            data = sys.stdin.buffer.read(min(CHUNK, remaining))
+            if not data:
+                raise ValueError("Incomplete relay upload")
+            handle.write(data)
+            remaining -= len(data)
+        if sys.stdin.buffer.read(1):
+            raise ValueError("Relay upload exceeds expected size")
+        handle.seek(0)
+        if sha256(handle, size) != expected_hash:
+            raise ValueError("Relay upload hash mismatch")
+        handle.flush()
+        os.fsync(fd)
+    os.replace(part, path)
+elif mode == "stage":
+    target = Path(args[0])
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with regular_reader(path) as source:
+        fd, temporary = tempfile.mkstemp(dir=target.parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                shutil.copyfileobj(source, handle, CHUNK)
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+"""
 
 
 @dataclass
@@ -415,6 +541,137 @@ class SshTransport:
             except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 return _result(started, 1, error=str(exc))
             return _result(started, result.returncode, result.stdout, result.stderr)
+
+    def _relay_rpc(self, host, mode, path, *args, timeout_s, reason):
+        try:
+            result = self.run_remote(
+                host, _python_command(_RELAY_REMOTE, mode, path, *map(str, args)),
+                timeout_s=timeout_s,
+            )
+            if result.ok:
+                response = json.loads(result.stdout)
+                if isinstance(response, dict):
+                    return response
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise RelayError(f"Relay {mode} request failed.", reason=reason, retryable=True) from exc
+        raise RelayError(f"Relay {mode} request failed.", reason=reason, retryable=True)
+
+    def _relay_stream(self, host, command, *, timeout_s, **streams):
+        with self._slot(host):
+            return self._runner(
+                [*self._argv(host), command], shell=False, stderr=subprocess.PIPE,
+                timeout=timeout_s, env=build_ssh_env(), **streams,
+            )
+
+    def relay_file(
+        self, src_host: HostConfig, src_path: str, dst_host: HostConfig, dst_path: str, *,
+        local_cache_path: Path, max_bytes: int | None = None, timeout_s: float = 300.0,
+    ) -> dict[str, Any]:
+        limit = DEFAULT_RELAY_MAX_BYTES if max_bytes is None else max_bytes
+        started = time.monotonic()
+        source_error = "relay_source_unreachable"
+        upload_error = "relay_upload_failed"
+        size_error = "relay_exceeds_max_bytes"
+        source = self._relay_rpc(
+            src_host, "source", src_path, limit,
+            timeout_s=self._remaining(started, timeout_s), reason=source_error,
+        )
+        if source.get("exists") is False or source.get("is_file") is False:
+            raise RelayError("Relay source is missing or is not a regular file.",
+                             reason="relay_missing_source", retryable=False)
+        size, digest = source.get("size"), source.get("sha256")
+        if type(size) is not int or size < 0:
+            raise RelayError("Relay source returned an invalid size.", reason=source_error, retryable=True)
+        if size > limit:
+            raise RelayError("Relay source exceeds the byte limit.", reason=size_error, retryable=False)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RelayError("Relay source returned an invalid hash.", reason=source_error, retryable=True)
+        target = self._relay_rpc(
+            dst_host, "target", dst_path, size, digest,
+            timeout_s=self._remaining(started, timeout_s), reason=upload_error,
+        )
+        receipt = {"ok": True, "size": size, "sha256": digest, "downloaded_bytes": 0, "uploaded_bytes": 0}
+        if target.get("size") == size and target.get("sha256") == digest:
+            return {**receipt, "cache_hit": True}
+
+        try:
+            ensure_private_dir(local_cache_path.parent)
+            if (local_cache_path.is_symlink() or not local_cache_path.is_file()
+                    or local_cache_path.stat().st_size != size
+                    or compute_file_sha256(local_cache_path) != digest):
+                receipt["downloaded_bytes"] = self._download_relay(
+                    src_host, src_path, local_cache_path, size, digest, limit, started, timeout_s,
+                )
+        except OSError as exc:
+            raise RelayError("Could not stage the relay locally.",
+                             reason="relay_local_staging_failed", retryable=True) from exc
+
+        part = target.get("part", {})
+        offset = part.get("size", 0)
+        try:
+            if not (0 < offset <= size and part.get("sha256") == compute_file_sha256(local_cache_path, offset)):
+                offset = 0
+            with local_cache_path.open("rb") as handle:
+                handle.seek(offset)
+                sent = self._relay_stream(
+                    dst_host, _python_command(_RELAY_REMOTE, "upload", dst_path,
+                                              str(offset), str(size), digest),
+                    stdin=handle, stdout=subprocess.DEVNULL, timeout_s=self._remaining(started, timeout_s),
+                )
+            if sent.returncode:
+                raise RelayError("Relay upload or target verification failed.", reason=upload_error, retryable=True)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            raise RelayError("Relay upload failed.", reason=upload_error, retryable=True) from exc
+        return {**receipt, "cache_hit": False, "uploaded_bytes": size - offset}
+
+    def _download_relay(self, host, src_path, cache, size, digest, limit, started, timeout_s) -> int:
+        partial = cache.with_name(cache.name + ".part")
+        offset = 0
+        if not partial.is_symlink() and partial.is_file():
+            length = partial.stat().st_size
+            if length == size and compute_file_sha256(partial) == digest:
+                os.chmod(partial, 0o600)
+                os.replace(partial, cache)
+                return 0
+            if 0 < length < size:
+                prefix = self._relay_rpc(
+                    host, "prefix", src_path, length, timeout_s=self._remaining(started, timeout_s),
+                    reason="relay_source_unreachable",
+                )
+                if prefix.get("sha256") == compute_file_sha256(partial, length):
+                    offset = length
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(fd, 0o600)
+            handle.truncate(offset)
+            handle.seek(offset)
+            try:
+                received = self._relay_stream(
+                    host, _python_command(_RELAY_REMOTE, "download", src_path, str(offset), str(limit)),
+                    stdin=subprocess.DEVNULL, stdout=handle, timeout_s=self._remaining(started, timeout_s),
+                )
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                raise RelayError("Relay download failed.", reason="relay_source_unreachable", retryable=True) from exc
+        length = partial.stat().st_size
+        if received.returncode == 42 or length > limit:
+            partial.unlink()
+            raise RelayError("Relay download exceeds the byte limit.",
+                             reason="relay_exceeds_max_bytes", retryable=False)
+        if received.returncode:
+            raise RelayError("Relay download failed.", reason="relay_source_unreachable", retryable=True)
+        if length != size or compute_file_sha256(partial) != digest:
+            partial.unlink()
+            raise RelayError("Relay download hash mismatch.", reason="relay_hash_mismatch", retryable=True)
+        os.replace(partial, cache)
+        return length - offset
+
+    def stage_local_input(
+        self, host: HostConfig, src_path: str, dst_path: str, *, timeout_s: float = 30.0,
+    ) -> bool:
+        return self.run_remote(
+            host, _python_command(_RELAY_REMOTE, "stage", src_path, dst_path),
+            timeout_s=timeout_s, retry_mux=False,
+        ).ok
 
     def close_host(self, host: HostConfig) -> None:
         with self._slot(host):

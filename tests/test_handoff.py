@@ -710,6 +710,66 @@ class TelemetryTests(HandoffFixture):
 
 
 class EngineTests(HandoffFixture):
+    def _dispatch_summary(self, run_id, *, terminal=False, updated_at=12):
+        run_dir = self.root / run_id
+        run_dir.mkdir()
+        (run_dir / "summary.json").write_text(json.dumps({
+            "run_id": run_id, "controller_pid": os.getpid(), "terminal": terminal, "updated_at": updated_at,
+            "task_counts": {"completed" if terminal else "running": 1},
+            "host_gpu_summary": {"worker": {"state": "ready", "free_gpu_ids": [1], "leased_gpu_ids": [0],
+                                            "draining_for": f"job-{MOCK_CSRF}", "credentials": MOCK_CSRF}},
+            "tasks": {"job": {"command": f"Authorization: Bearer {MOCK_CSRF}"}},
+        }))
+        return run_dir
+
+    def test_create_shim_includes_explicit_dispatch_in_manifest_and_packet(self):
+        run = self._dispatch_summary("explicit", terminal=True)
+        result = self.create("--dry-run", "--dispatch-run-dir", run, "--out-dir", self.root / "out", shim=True)
+        packet = Path(result["packet_path"]).read_text()
+        manifest = Path(result["manifest_path"]).read_text()
+        dispatch = json.loads(manifest)["runtime_snapshot"]["dispatch_runs"]
+        fence = chr(96) * 3
+        section = packet.split("## 9. Deterministic Runtime Snapshot", 1)[1].split(f"{fence}json\n", 1)[1]
+        self.assertEqual(json.loads(section.split(fence, 1)[0])["dispatch_runs"], dispatch)
+        self.assertEqual(len(dispatch), 1)
+        self.assertEqual((dispatch[0]["run_id"], dispatch[0]["run_dir"], dispatch[0]["terminal"]),
+                         ("explicit", str(run), True))
+        self.assertTrue(dispatch[0]["controller_alive"])
+        self.assertEqual(dispatch[0]["hosts"], {
+            "worker": {"state": "ready", "free_gpu_ids": [1], "leased_gpu_ids": [0],
+                       "draining_for": "job-[REDACTED]"},
+        })
+        self.assertNotIn(MOCK_CSRF, packet + manifest)
+        self.assertNotIn('"credentials"', packet + manifest)
+
+    def test_dispatch_registry_discovery_skips_terminal_and_uses_state_fallback(self):
+        active = self._dispatch_summary("active")
+        terminal = self._dispatch_summary("terminal", terminal=True, updated_at=90)
+        stale = self._dispatch_summary("stale", terminal=True)
+        fallback = self.root / "fallback"
+        fallback.mkdir()
+        (fallback / "state.json").write_text(json.dumps({
+            "run_id": "fallback", "tasks": {"job": {"state": "relaying"}},
+            "hosts": {"worker": {"state": "ready", "draining_for": "job"}},
+        }))
+        registry = Path(self.environ["PLUGIN_DATA"]) / "dispatch_runs.json"
+        registry.parent.mkdir()
+        registry.write_text(json.dumps({"version": "1", "runs": {
+            path.name: {"run_dir": str(path), "terminal": path == terminal, "updated_at": 50}
+            for path in (active, terminal, stale, fallback, self.root / "missing")
+        }}))
+        with mock.patch.object(handoff.subprocess, "run", side_effect=AssertionError("Unexpected subprocess")):
+            discovered = handoff.collect_dispatch_runs_snapshot(environ=self.environ)
+            self.assertEqual([run["run_id"] for run in discovered], ["fallback", "active"])
+            self.assertEqual(discovered[0]["task_counts"], {"relaying": 1})
+            self.assertFalse(discovered[0]["controller_alive"])
+            self.assertNotIn(MOCK_CSRF, json.dumps(discovered))
+            self.assertEqual(handoff.collect_dispatch_runs_snapshot(environ={}), [])
+            explicit = handoff.collect_dispatch_runs_snapshot(
+                dispatch_run_dirs=[active, terminal], environ=self.environ,
+            )
+            self.assertEqual([run["run_id"] for run in explicit], ["fallback", "active", "terminal"])
+
     def test_runtime_snapshot_bounds_status_diff_worktrees_and_artifacts(self):
         status = "\n".join(f" M {idx:02d}-" + "界" * 40 for idx in range(30))
         diff = "\n".join(f"file-{idx:02d} | 1 +" for idx in range(32))
