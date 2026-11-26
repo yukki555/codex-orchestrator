@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from .context_telemetry import (
     ContextAssessment,
     TranscriptTelemetry,
+    _payload_marks_child,
     chain_position_from_tags,
     evaluate_context_band,
     hash_user_input,
@@ -175,7 +176,7 @@ def _effective_mode(cfg: Mapping[str, object], state: Mapping[str, object]) -> s
 
 
 def _noise_notice(
-    nudge: str, telemetry: TranscriptTelemetry, assessment: ContextAssessment, *, hook_metadata: bool
+    nudge: str, telemetry: TranscriptTelemetry, assessment: ContextAssessment, *, hook_metadata: bool, read_spike: bool
 ) -> dict:
     if nudge == "remote_noise":
         status = (
@@ -183,11 +184,24 @@ def _noise_notice(
             f"最近连续 {telemetry.remote_turn_streak} 个工具回合含远程操作。"
             '剩余 SSH、同步和轮询可交给 `remote-runner`（优先 Model="flash"）。'
         )
+    elif nudge == "read_noise":
+        unbounded = (f"（其中 {telemetry.read_file_unbounded_count} 次未限定范围）"
+                     if telemetry.read_file_unbounded_count else "")
+        spike = f"单步激增 +{telemetry.last_turn_delta_tokens:,} tokens。" if read_spike else ""
+        status = (
+            f"当前上下文已直接读取 {telemetry.read_file_count} 次文件{unbounded}，"
+            f"已使用 {assessment.active_tokens:,} tokens。{spike}"
+            '请停止继续整文件 read_file；把剩余跨文件排查直接委派给内置 research 子代理'
+            '（invoke_subagent(TypeName="research")），主会话仅保留 <= 200 行带 StartLine/EndLine 的局部读取。'
+        )
     else:
         status = (
-            f"当前上下文中已读取 {telemetry.read_file_count} 次文件，"
-            f"当前上下文 {assessment.active_tokens:,} tokens。"
-            "剩余的广泛只读探索可交给内置 `research` 子代理。"
+            f"当前上下文累计直接读取文件 {telemetry.read_file_count} 次，"
+            f"距上次委派 research 后直接读取 {telemetry.reads_since_last_research} 次"
+            "（尚未委派时从本轮 checkpoint 开始计数）。"
+            f"已使用 {assessment.active_tokens:,} tokens。"
+            '请立即委派内置 research 子代理（invoke_subagent(TypeName="research")）'
+            '或用 rg/python3 提取所需片段，以保留 200K soft budget。'
         )
     return _inject(
         f"[codex-context-handoff:{nudge}] {status}",
@@ -230,6 +244,7 @@ def _pre_invocation(
 
     handoff_enabled = effective_mode != "off" and not suppress_handoff
     if state.get("checkpoint_epoch") != epoch:
+        state.pop("read_noise_l1_reads", None)
         if handoff_enabled:
             state.update(checkpoint_epoch=epoch, fired_bands=[], fatigue_fired=False, fired_nudges=[])
         elif "checkpoint_epoch" in state:
@@ -255,6 +270,13 @@ def _pre_invocation(
     if not noise_cfg["enabled"] or suppress_noise:
         return {}
     fired_nudges = state.get("fired_nudges", [])
+    read_min_tokens = min(int(noise_cfg["read_file_min_tokens"]),
+                          int(assessment.context_limit * float(noise_cfg["read_file_min_ratio"])))
+    has_research = "research" in telemetry.invoked_subagents
+    read_threshold = noise_cfg["read_file_threshold"]
+    rearm_delta = noise_cfg["read_file_rearm_delta"]
+    read_spike = (telemetry.last_turn_had_read_file
+                  and telemetry.last_turn_delta_tokens >= noise_cfg["read_spike_tokens"])
     if (
         "remote_noise" not in fired_nudges and "remote-runner" not in telemetry.invoked_subagents
         and (telemetry.remote_cmd_count >= noise_cfg["remote_cmd_threshold"]
@@ -262,33 +284,24 @@ def _pre_invocation(
     ):
         nudge = "remote_noise"
     elif (
-        "read_noise" not in fired_nudges and "research" not in telemetry.invoked_subagents
-        and telemetry.read_file_count >= noise_cfg["read_file_threshold"]
-        and assessment.active_tokens >= noise_cfg["read_file_min_tokens"]
+        "read_noise" not in fired_nudges and not has_research
+        and ((telemetry.read_file_count >= read_threshold and assessment.active_tokens >= read_min_tokens)
+             or read_spike)
     ):
         nudge = "read_noise"
+        state["read_noise_l1_reads"] = telemetry.read_file_count
+    elif "read_noise_l2" not in fired_nudges and (
+        ("read_noise" in fired_nudges and not has_research
+         and telemetry.read_file_count >= int(state.get("read_noise_l1_reads") or 0) + rearm_delta)
+        or (has_research and telemetry.reads_since_last_research >= read_threshold + rearm_delta
+            and assessment.active_tokens >= read_min_tokens)
+    ):
+        nudge = "read_noise_l2"
     else:
         return {}
     state.update(checkpoint_epoch=epoch, fired_nudges=[*fired_nudges, nudge])
-    return _noise_notice(nudge, telemetry, assessment, hook_metadata=hook_metadata)
+    return _noise_notice(nudge, telemetry, assessment, hook_metadata=hook_metadata, read_spike=read_spike)
 
-
-def _payload_marks_child(payload: Mapping[str, object], cid: str) -> bool:
-    metadata = payload.get("metadata")
-    for fields in (payload, metadata):
-        if not isinstance(fields, Mapping):
-            continue
-        for key in ("parentConversationId", "parent_conversation_id"):
-            value = fields.get(key)
-            if isinstance(value, str) and value.strip():
-                return True
-        for key in ("rootConversationId", "root_conversation_id"):
-            value = fields.get(key)
-            if isinstance(value, str) and value.strip() not in ("", cid):
-                return True
-        if fields.get("isSubagent") is True or fields.get("is_subagent") is True:
-            return True
-    return False
 
 
 def evaluate_context_hook(

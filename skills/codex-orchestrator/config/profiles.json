@@ -72,8 +72,11 @@
       "enabled": true,
       "remote_cmd_threshold": 4,
       "remote_streak_threshold": 3,
-      "read_file_threshold": 12,
-      "read_file_min_tokens": 80000
+      "read_file_threshold": 6,
+      "read_file_rearm_delta": 6,
+      "read_file_min_tokens": 45000,
+      "read_file_min_ratio": 0.12,
+      "read_spike_tokens": 25000
     },
     "soft_ratio": 0.45,
     "soft_cap_tokens": 200000,

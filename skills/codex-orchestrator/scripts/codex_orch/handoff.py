@@ -29,7 +29,7 @@ _HANDOFFS = Path("/tmp/codex-orchestrator/handoffs")
 _SERVICE = "product.v1.ConversationService"
 _TIERS = ("pro", "flash", "flash_lite")
 _MIN_PACKET_BYTES = 400
-_MAX_PACKET_BYTES = 24576
+_MAX_PACKET_BYTES = 16384
 _SECTIONS = re.compile(r"^##[ \t]+(?:(\d+)\.[ \t]+)?[^\n]*", re.MULTILINE)
 _COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 _PATH_SUFFIX = re.compile(r"(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)$")
@@ -232,6 +232,29 @@ def _worktrees(root):
     return sorted(worktrees, key=lambda item: item["path"])
 
 
+def _truncate_snapshot_text(text: str, *, max_lines: int, max_bytes: int, hint: str) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines and len(text.encode("utf-8")) <= max_bytes:
+        return text
+
+    kept_bytes = 0
+    best = 0
+    for count in range(1, min(len(lines), max_lines)):
+        kept_bytes += len(lines[count - 1].encode("utf-8")) + 1
+        marker = f"... ({len(lines) - count} more lines truncated; {hint})"
+        if kept_bytes + len(marker.encode("utf-8")) > max_bytes:
+            break
+        best = count
+    prefix = "\n".join(lines[:best])
+    return f"{prefix}\n... ({len(lines) - best} more lines truncated; {hint})"
+
+
+def _cap_snapshot_entries(entries: list, limit: int) -> list:
+    if len(entries) <= limit:
+        return entries
+    return [*entries[:limit], {"truncated_count": len(entries) - limit}]
+
+
 def _workspace_snapshot(workspace):
     root = _git_root(workspace)
     snapshot = dict(path=str(workspace), is_git_repo=root is not None, branch="", head_oid="",
@@ -249,8 +272,14 @@ def _workspace_snapshot(workspace):
         branch=_git_text(root, "rev-parse", "--abbrev-ref", "HEAD") if oid else
         _git_text(root, "symbolic-ref", "--short", "HEAD"),
         head_oid=oid, head_subject=subject,
-        status_porcelain=_git_text(root, "status", "--porcelain=v1", "--untracked-files=all"),
-        diff_stat=diff_stat, worktrees=_worktrees(root),
+        status_porcelain=_truncate_snapshot_text(
+            _git_text(root, "status", "--porcelain=v1", "--untracked-files=all"),
+            max_lines=25, max_bytes=2048, hint="run git status --short for full list",
+        ),
+        diff_stat=_truncate_snapshot_text(
+            diff_stat, max_lines=25, max_bytes=2048, hint="run git diff --stat for full list",
+        ),
+        worktrees=_cap_snapshot_entries(_worktrees(root), 10),
     )
     return snapshot
 
@@ -281,6 +310,7 @@ def _artifact_fields(data):
 
 def _artifact_snapshot(directory):
     artifacts = []
+    omitted = 0
     if not directory.is_dir():
         return {"path": str(directory), "artifacts": artifacts}
     children = sorted(path for path in directory.iterdir()
@@ -290,6 +320,9 @@ def _artifact_snapshot(directory):
             path = parent / name
             if not (path.is_dir() if name == "corpus" else path.is_file()):
                 continue
+            if len(artifacts) == 12:
+                omitted += 1
+                continue
             entry = {"path": str(path)}
             if path.suffix == ".json":
                 try:
@@ -297,6 +330,8 @@ def _artifact_snapshot(directory):
                 except (OSError, ValueError):
                     entry["readable"] = False
             artifacts.append(entry)
+    if omitted:
+        artifacts.append({"truncated_count": omitted})
     return {"path": str(directory), "artifacts": artifacts}
 
 
@@ -311,11 +346,15 @@ def collect_runtime_snapshot(*, workspaces=(), artifact_dirs=(), conversation_id
     workspace_paths = sorted({Path(path).expanduser().resolve() for path in workspaces})
     artifact_paths = sorted({Path(path).expanduser().resolve() for path in artifact_dirs})
     brain = _brain_dir(conversation_id, app_data_dir)
+    all_docs = (sorted(str(path) for path in brain.glob("*.md") if path.is_file())
+                if brain is not None else [])
+    conversation_artifacts = all_docs[:15]
+    if len(all_docs) > 15:
+        conversation_artifacts.append(f"... ({len(all_docs) - 15} more conversation artifacts truncated)")
     snapshot = {
         "workspaces": [_workspace_snapshot(path) for path in workspace_paths],
         "artifact_dirs": [_artifact_snapshot(path) for path in artifact_paths],
-        "conversation_artifacts": sorted(str(path) for path in brain.glob("*.md") if path.is_file())
-        if brain is not None else [],
+        "conversation_artifacts": conversation_artifacts,
     }
     return _safe_data(snapshot, os.environ)
 
@@ -341,10 +380,12 @@ def build_bootstrap_prompt(*, packet_path: Path, manifest_path: Path, prev_conve
     return (
         f"[Codex Orchestrator Session Handoff — Chain {chain_id} · Hop {hop_index}/{max_hops}]\n"
         f"上一会话：conversation://{prev_conversation_id}\n\n"
-        f"1. 并行用 `read_file` 读取 `{packet_path}`、`{manifest_path}`，并读取第 6 节"
-        "（Active Working Set）列在最前面的文件。禁止预先扫描整个仓库或通读上一会话 transcript。"
+        f"1. 本步仅用 `read_file` 读取 `{packet_path}`。禁止再读 `handoff-manifest.json`，其快照已在第 9 节。"
+        "禁止预读第 6 节（Active Working Set）的所有文件、扫描整个仓库或通读上一会话 transcript。"
+        "若第 1 轮只需 1–2 个片段，必须用 `StartLine`/`EndLine` 限定范围，或用 `rg`/`python3` 提取。"
+        '若需理解 >= 3 个代码或数据文件，第 1 轮必须并行派发内置 `research` 子代理（`invoke_subagent(TypeName="research")`）。'
         f"只在需要时查询 `{prev_transcript_path or '上一会话 transcript（路径未记录）'}` 的相关片段。\n"
-        "2. 在 3 秒内运行 `git rev-parse HEAD` 和 `git status --short`，与第 9 节及清单的快照核对。\n"
+        "2. 在 3 秒内运行 `git rev-parse HEAD` 和 `git status --short`，与第 9 节快照核对。\n"
         f"3. {action}\n"
         + json.dumps({"prev_conversation_id": prev_conversation_id,
                       "prev_transcript_path": prev_transcript_path, "chain_id": chain_id,

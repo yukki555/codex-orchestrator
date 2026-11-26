@@ -42,6 +42,13 @@ class TranscriptTelemetry:
     read_file_count: int = 0
     invoked_subagents: tuple[str, ...] = ()
     is_subagent: bool = False
+    read_file_unbounded_count: int = 0
+    read_file_duplicate_count: int = 0
+    read_file_est_bytes: int = 0
+    plugin_doc_read_count: int = 0
+    last_turn_delta_tokens: int = 0
+    last_turn_had_read_file: bool = False
+    reads_since_last_research: int = 0
 
 
 @dataclass(frozen=True)
@@ -200,14 +207,54 @@ def _is_remote_tool_call(name: str, args: Mapping[str, object]) -> bool:
     return False
 
 
-def _is_counted_read_file(name: str, args: Mapping[str, object]) -> bool:
-    if name != "read_file":
-        return False
-    raw_path = _unquote_tool_arg(args.get("Path", args.get("path", args.get("AbsolutePath", "")))).strip()
-    norm_path = raw_path.replace("\\", "/")
-    if "/handoff/" in norm_path or norm_path.endswith("/handoff"):
-        return False
-    return not norm_path.startswith(("/tmp/codex-orchestrator/", "/private/tmp/codex-orchestrator/"))
+def _is_plugin_doc_path(norm_path: str) -> bool:
+    for root in ("/.gemini/config/plugins/", "/.gemini/antigravity/builtin/skills/",
+                 "/codex-orchestrator/skills/"):
+        if root in norm_path:
+            relative = "/" + norm_path.split(root, 1)[1]
+            return (relative.endswith(("/SKILL.md", "/rules/AGENTS.md"))
+                    or re.search(r"/references/[^/]+\.md$", relative) is not None)
+    return False
+
+
+def _read_path(args: Mapping[str, object]) -> str:
+    for key in ("Path", "path", "AbsolutePath", "file_path"):
+        path = _unquote_tool_arg(args.get(key)).strip()
+        if path:
+            return os.path.normpath(os.path.expanduser(path.replace("\\", "/")))
+    return ""
+
+
+def _is_excluded_read_path(norm_path: str) -> bool:
+    return ("/handoff/" in norm_path or norm_path.endswith("/handoff")
+            or norm_path.startswith(("/tmp/codex-orchestrator/", "/private/tmp/codex-orchestrator/")))
+
+
+def _read_line_arg(args: Mapping[str, object], *keys: str) -> int | None:
+    for key in keys:
+        if key in args:
+            try:
+                value = args[key]
+                return value if type(value) is int else int(_unquote_tool_arg(value))
+            except ValueError:
+                return None
+    return None
+
+
+def _read_size_estimate(path: str, args: Mapping[str, object]) -> tuple[bool, int]:
+    end = _read_line_arg(args, "EndLine", "end_line")
+    limit = _read_line_arg(args, "limit")
+    if end is not None:
+        start = _read_line_arg(args, "StartLine", "start_line", "offset")
+        return False, max(1, end - (1 if start is None else start) + 1) * 60
+    if limit is not None:
+        return False, max(1, limit) * 60
+    try:
+        if os.path.isfile(path):
+            return True, os.path.getsize(path)
+    except OSError:
+        pass
+    return True, 0
 
 
 def _is_subagent_bootstrap_row(row: Mapping[str, object]) -> bool:
@@ -223,6 +270,28 @@ def _is_subagent_bootstrap_row(row: Mapping[str, object]) -> bool:
     )
 
 
+def _payload_marks_child(payload: Mapping[str, object], cid: str) -> bool:
+    metadata = payload.get("metadata")
+    for fields in (payload, metadata):
+        if not isinstance(fields, Mapping):
+            continue
+        for key in ("parentConversationId", "parent_conversation_id", "parentSessionId", "parent_session_id"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        for key in ("rootConversationId", "root_conversation_id"):
+            value = fields.get(key)
+            if cid and isinstance(value, str) and value.strip() not in ("", cid):
+                return True
+        if any(fields.get(key) is True for key in ("isSubagent", "is_subagent", "subagent")):
+            return True
+        for key in ("subagent", "subagentName", "subagent_name"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
 def read_transcript_telemetry(
     transcript_path: str | Path | None, *, tail_bytes: int = 262144
 ) -> TranscriptTelemetry:
@@ -234,6 +303,11 @@ def read_transcript_telemetry(
     last_model = ""
     recent_models: dict[str, None] = {}
     remote_cmd_count = remote_turn_streak = read_file_count = 0
+    read_file_unbounded_count = read_file_duplicate_count = read_file_est_bytes = 0
+    plugin_doc_read_count = reads_since_last_research = last_turn_delta_tokens = 0
+    last_turn_had_read_file = prev_turn_had_read_file = False
+    prev_active_tokens = None
+    seen_read_paths: set[str] = set()
     invoked_subagents: dict[str, None] = {}
     is_subagent = False
     seen_first_line = False
@@ -275,6 +349,11 @@ def read_transcript_telemetry(
                         last_model = ""
                         recent_models.clear()
                         remote_cmd_count = remote_turn_streak = read_file_count = 0
+                        read_file_unbounded_count = read_file_duplicate_count = read_file_est_bytes = 0
+                        plugin_doc_read_count = reads_since_last_research = last_turn_delta_tokens = 0
+                        last_turn_had_read_file = prev_turn_had_read_file = False
+                        prev_active_tokens = None
+                        seen_read_paths.clear()
                         invoked_subagents.clear()
                     index = row.get("step_index", row.get("stepIndex", row.get("index")))
                     if in_tail and type(index) is int:
@@ -286,6 +365,13 @@ def read_transcript_telemetry(
                         last_model = model if isinstance(model, str) else ""
                         if last_model.strip():
                             recent_models[last_model] = None
+                        input_tokens, cache_read_tokens, _ = _planner_tokens(row)
+                        active_tokens = input_tokens + cache_read_tokens
+                        if prev_active_tokens is not None:
+                            last_turn_delta_tokens = max(0, active_tokens - prev_active_tokens)
+                            last_turn_had_read_file = prev_turn_had_read_file
+                        prev_active_tokens = active_tokens
+                        prev_turn_had_read_file = False
                         tool_calls = row.get("tool_calls", row.get("toolCalls"))
                         if not isinstance(tool_calls, list):
                             continue
@@ -301,13 +387,27 @@ def read_transcript_telemetry(
                             if _is_remote_tool_call(call_name, args):
                                 remote_cmd_count += 1
                                 turn_has_remote = True
-                            elif _is_counted_read_file(call_name, args):
-                                read_file_count += 1
+                            elif call_name == "read_file":
+                                read_path = _read_path(args)
+                                if _is_plugin_doc_path(read_path):
+                                    plugin_doc_read_count += 1
+                                elif not _is_excluded_read_path(read_path):
+                                    read_file_count += 1
+                                    reads_since_last_research += 1
+                                    prev_turn_had_read_file = True
+                                    if read_path:
+                                        read_file_duplicate_count += read_path in seen_read_paths
+                                        seen_read_paths.add(read_path)
+                                    unbounded, estimated_bytes = _read_size_estimate(read_path, args)
+                                    read_file_unbounded_count += unbounded
+                                    read_file_est_bytes += estimated_bytes
                             elif call_name == "invoke_subagent":
                                 type_name = args.get("TypeName", args.get("type_name", args.get("typeName", "")))
                                 subagent = _unquote_tool_arg(type_name).strip().lower()
                                 if subagent:
                                     invoked_subagents[subagent] = None
+                                if subagent == "research":
+                                    reads_since_last_research = 0
                         if turn_has_tools:
                             remote_turn_streak = remote_turn_streak + 1 if turn_has_remote else 0
     except (OSError, ValueError):
@@ -333,6 +433,13 @@ def read_transcript_telemetry(
         read_file_count=read_file_count,
         invoked_subagents=tuple(invoked_subagents),
         is_subagent=is_subagent,
+        read_file_unbounded_count=read_file_unbounded_count,
+        read_file_duplicate_count=read_file_duplicate_count,
+        read_file_est_bytes=read_file_est_bytes,
+        plugin_doc_read_count=plugin_doc_read_count,
+        last_turn_delta_tokens=last_turn_delta_tokens,
+        last_turn_had_read_file=last_turn_had_read_file,
+        reads_since_last_research=reads_since_last_research,
     )
 
 

@@ -5,12 +5,12 @@ description: Plan, write a Spec, delegate implementation to Codex CLI via 1-hop 
 
 # Single-Task Structured Implementation (`/impl`)
 
-Act as **Principal Engineering Manager** in Google Antigravity following `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md`.
+Consult `../codex-orchestrator/references/cli-reference.md` only when using advanced `--tdd`, `--contract`, or `--verify-cmd` options.
 
 Execute strictly in order:
 
 1. **Fold-First Check & Targeted Exploration**:
-   * Read only the relevant files via `read_file` and compact read-only checks.
+   * Use bounded `read_file` slices of <= 200 lines and compact read-only checks. Delegate read-only exploration across >= 3 files or any > 20 KB file to built-in `research`.
    * Clarify any major architecture or scope tradeoff with the user before implementing. If the task modifies `>= 3` loosely coupled files or `> 200` lines, switch to `/dag` (or native `/swarm` followed by `/review` if mid-flight negotiation is required).
 2. **Author GPT-6.2 Spec (Optional Cross-Model TDD)**:
    * Write `/tmp/codex-orchestrator/<task-id>/spec.md` using `~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/references/task-spec-template.md`.

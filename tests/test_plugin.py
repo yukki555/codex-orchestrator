@@ -31,6 +31,7 @@ SCRIPTS = CORE_SKILL / "scripts"
 GUARD = SCRIPTS / "hook_delegate_guard.py"
 CONTEXT_GUARD = SCRIPTS / "hook_context_guard.py"
 HANDOFF_SH = SCRIPTS / "handoff.sh"
+READ_GUARD = SCRIPTS / "hook_read_guard.py"
 RULES = ROOT / "rules" / "AGENTS.md"
 AGENT = ROOT / "agents" / "codex-worker.md"
 REMOTE_RUNNER = ROOT / "agents" / "remote-runner.md"
@@ -118,6 +119,15 @@ class AntigravityPluginTests(unittest.TestCase):
                     ),
                     f"No PreToolUse matcher routes {tool} to {guard_path}",
                 )
+        self.assertEqual(hooks["codex-read-guard"], {
+            "PreToolUse": [{
+                "matcher": "^read_file$|^view_file$",
+                "hooks": [{
+                    "type": "command", "command": "python3 ./" + READ_GUARD.relative_to(ROOT).as_posix(),
+                    "timeout": 5,
+                }],
+            }],
+        })
         context_hooks = hooks["codex-context-handoff"]
         self.assertEqual(set(context_hooks), {"PreInvocation", "Stop"})
         context_guard_path = "./" + CONTEXT_GUARD.relative_to(ROOT).as_posix()
@@ -127,7 +137,7 @@ class AntigravityPluginTests(unittest.TestCase):
                     hook["type"] == "command" and context_guard_path in hook["command"].split()
                     for hook in entries
                 ))
-        for shim in (GUARD, CONTEXT_GUARD, HANDOFF_SH, SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh"):
+        for shim in (GUARD, CONTEXT_GUARD, READ_GUARD, HANDOFF_SH, SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh"):
             self.assertEqual(stat.S_IMODE(shim.stat().st_mode), 0o755, shim)
 
     def test_all_output_schemas_are_strict(self):
@@ -229,6 +239,85 @@ class AntigravityPluginTests(unittest.TestCase):
                 for marker in ("{{args}}", "!{", "~/.gemini/extensions/"):
                     self.assertNotIn(marker, content, f"{path} contains {marker!r}")
 
+    def test_context_hygiene_doc_budgets_and_reference(self):
+        for path, lines, size in (
+            (CORE_SKILL / "SKILL.md", 50, 5200),
+            (SKILLS / "handoff" / "SKILL.md", 34, 3400),
+        ):
+            with self.subTest(path=path):
+                content = path.read_bytes()
+                self.assertLessEqual(len(content.splitlines()), lines)
+                self.assertLessEqual(len(content), size)
+        reference = (REFERENCES / "cli-reference.md").read_text(encoding="utf-8")
+        for marker in ("{{args}}", "!{", "~/.gemini/extensions/", "Template A", "Template B"):
+            self.assertNotIn(marker, reference)
+
+    def test_read_guard_scope_bounds_exemptions_and_fail_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            small = root / "small.txt"
+            small.write_bytes(b"x" * 20480)
+            large = root / "large.txt"
+            large.write_bytes(b"x\n" * 11000)
+            pdf = root / "artifact.PDF"
+            pdf.write_bytes(large.read_bytes())
+            packet = root / "handoff" / "handoff-hop-01.md"
+            packet.parent.mkdir()
+            packet.write_bytes(large.read_bytes())
+            transcript = root / "transcript.jsonl"
+            transcript.write_text("\n" + json.dumps({
+                "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "stepIndex": 0,
+                "content": "[Message] timestamp=2026-01-01T00:00:00Z sender=root-conversation",
+            }) + "\ninvalid later row\n", encoding="utf-8")
+
+            def payload(path=large, *, args=None, **fields):
+                return {"toolCall": {"name": "read_file", "args": {"Path": str(path), **(args or {})}}, **fields}
+
+            cases = [
+                ("threshold", payload(small), {}, "allow"),
+                ("unbounded", payload(), {}, "deny"),
+                ("start-only", payload(args={"StartLine": 2}), {}, "deny"),
+                ("bounded", payload(args={"StartLine": 2, "EndLine": 451}), {}, "allow"),
+                ("too many lines", payload(args={"StartLine": 1, "EndLine": 1000}), {}, "deny"),
+                ("byte offset", payload(args={"ByteOffset": 1}), {}, "allow"),
+                ("zero byte offset", payload(args={"ByteOffset": 0}), {}, "deny"),
+                ("PDF", payload(pdf), {}, "allow"),
+                ("handoff packet", payload(packet), {}, "allow"),
+                ("child marker", payload(metadata={"parentSessionId": "parent"}), {}, "allow"),
+                ("child transcript", payload(transcriptPath=str(transcript)), {}, "allow"),
+                ("opt-out", payload(lastUserInput="请全文读取"), {}, "allow"),
+                ("off", payload(), {"CODEX_READ_GUARD": "OfF"}, "allow"),
+                ("size override", payload(), {"CODEX_READ_GUARD_MAX_BYTES": "22000"}, "allow"),
+                ("invalid size override", payload(), {"CODEX_READ_GUARD_MAX_BYTES": "-1"}, "deny"),
+                ("span override", payload(args={"EndLine": 451}), {"CODEX_READ_GUARD_MAX_SPAN_LINES": "451"}, "allow"),
+                ("limit", {"tool_name": "VIEW_FILE", "tool_input": {"file_path": str(large), "limit": 450}},
+                 {}, "allow"),
+                ("Gemini CLI unbounded", {"tool_name": "view_file", "tool_input": {"file_path": str(large)}},
+                 {}, "deny"),
+                ("Gemini CLI opt-out", {"tool_name": "view_file", "tool_input": {"file_path": str(large)},
+                                        "last_user_input": "Read Full"}, {}, "allow"),
+                ("unrelated tool", {"tool_name": "edit_file", "tool_input": {"path": str(large)}}, {}, "allow"),
+                ("missing path", payload(root / "missing.txt"), {}, "allow"),
+                ("directory", payload(root), {}, "allow"),
+                ("malformed JSON", "{", {}, "allow"),
+                ("non-object JSON", [], {}, "allow"),
+            ]
+            environ = {key: value for key, value in os.environ.items() if not key.startswith("CODEX_READ_GUARD")}
+            for name, row, overrides, decision in cases:
+                with self.subTest(case=name):
+                    result = self._run(
+                        [sys.executable, str(READ_GUARD)],
+                        input=row if isinstance(row, str) else json.dumps(row), env={**environ, **overrides},
+                    )
+                    output = json.loads(result)
+                    if decision == "allow":
+                        self.assertEqual(output, {"decision": "allow"})
+                    else:
+                        self.assertEqual(output["decision"], "deny")
+                        for fragment in ("large.txt", "21.5 KB", "11,000 行", "StartLine/EndLine", "<= 450",
+                                         "rg", "python3", 'TypeName="research"', "CODEX_READ_GUARD=off", "全文读取"):
+                            self.assertIn(fragment, output["reason"])
+
     def test_communication_charter_consistency(self):
         charter = REFERENCES / "user-brief-template.md"
         required_markers = {
@@ -277,7 +366,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 self._run(["bash", "-n", str(SCRIPTS / script)])
         modules = sorted((SCRIPTS / "codex_orch").glob("*.py"))
         self.assertTrue(modules)
-        for path in (GUARD, CONTEXT_GUARD, *modules):
+        for path in (GUARD, CONTEXT_GUARD, READ_GUARD, *modules):
             compile(path.read_bytes(), path.name, "exec")
         for name in ("research_parallel.py", "debate_multi_critic.py"):
             path = CORE_SKILL / "workflows" / name

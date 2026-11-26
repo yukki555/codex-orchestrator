@@ -1,6 +1,6 @@
 # Session Handoff Packet Template (`v3.7`)
 
-Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24 KB`) following all 8 sections below before invoking `handoff.sh create`. Remove every `<!-- ... -->` comment before submission (`handoff.sh` fails closed on unresolved placeholders, missing sections, nonexistent paths in Sections 6–7, or unredacted secrets). Section `## 9. Deterministic Runtime Snapshot` is collected and appended automatically by `handoff.sh`.
+Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 16 KB`, with a `<= 16 KB` draft budget (16,384 bytes)) following all 8 sections below before invoking `handoff.sh create`. Compress prior-hop history into current facts, decisions, and pitfalls before adding current evidence. Remove every `<!-- ... -->` comment before submission (`handoff.sh` fails closed on unresolved placeholders, missing sections, nonexistent paths in Sections 6–7, or unredacted secrets). Section `## 9. Deterministic Runtime Snapshot` is collected and appended automatically by `handoff.sh`.
 
 ```markdown
 ## 1. Objective & Immutable Constraints
@@ -14,7 +14,7 @@ Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24
 - [ ] Phase 3 — Remaining milestone
 - **Immediate Next Atomic Action**. State the first actions after cold-start verification:
   - **Main Track**. Specify the primary manager decision or one-hop `run_codex.sh` action.
-  - **Parallel Subagent Track (Optional)**. Specify a short atomic wave to launch in parallel on Turn 1. Use `remote-runner` for sync or Launch-Verify-Return, or built-in `research` for broad read-only exploration.
+  - **Parallel Subagent Track (Optional)**. Specify a short atomic wave to launch in parallel on Turn 1. Use `remote-runner` for sync or Launch-Verify-Return. Dispatch built-in `research` on Turn 1 when comprehension requires >= 3 code or data files.
 
 ## 3. Verified Facts & Evidence Anchors
 - Separate confirmed facts from hypotheses. Cite exact `file:line`, commit SHAs, command exit codes, and measured metrics.
@@ -26,8 +26,8 @@ Write your draft Handoff Packet (`1.5K–3.5K` tokens; hard bounds `400 B – 24
 - List failed approaches, root causes of resolved bugs, and environment quirks (e.g., missing local packages, non-default SSH ports, API limitations) so the successor never repeats them.
 
 ## 6. Active Working Set
-- Ordered Top `5–8` exact file paths (with optional `:start-end` line ranges) the successor should read in 1 parallel batch to rebuild context without scanning the whole repo:
-  - `/absolute/path/to/primary_file.py:1-120` — role
+- **Immediate Touch**. Give at most 1–2 exact paths with target line ranges for the next atomic action (`/absolute/path/to/primary_file.py:1-120`). Read only those fragments when needed.
+- **Reference Map (Do NOT Pre-Read)**. List remaining paths and their roles for on-demand bounded reads or the built-in `research` subagent.
 
 ## 7. Codex Orchestrator & Artifact State
 - Active `/tmp/codex-orchestrator/<task-id>/` paths (`spec.md`, `contract.md`, `summary.json`, `parallel-summary.json`, `verification.json`, `changes.patch`, `corpus/`).

@@ -16,8 +16,11 @@ DEFAULT_CONTEXT_HANDOFF: dict = {
         "enabled": True,
         "remote_cmd_threshold": 4,
         "remote_streak_threshold": 3,
-        "read_file_threshold": 12,
-        "read_file_min_tokens": 80000,
+        "read_file_threshold": 6,
+        "read_file_rearm_delta": 6,
+        "read_file_min_tokens": 45000,
+        "read_file_min_ratio": 0.12,
+        "read_spike_tokens": 25000,
     },
     "soft_ratio": 0.45,
     "soft_cap_tokens": 200000,
@@ -90,12 +93,17 @@ def _validate_context_handoff(config: object) -> None:
         noise = config["noise_nudge"]
         if not isinstance(noise, dict):
             raise ValueError("context_handoff.noise_nudge must be an object")
+        noise = {**DEFAULT_CONTEXT_HANDOFF["noise_nudge"], **noise}
         if type(noise.get("enabled")) is not bool:
             raise ValueError("context_handoff.noise_nudge.enabled must be a boolean")
         for key in ("remote_cmd_threshold", "remote_streak_threshold", "read_file_threshold",
-                    "read_file_min_tokens"):
+                    "read_file_rearm_delta", "read_file_min_tokens", "read_spike_tokens"):
             if not _positive_int(noise.get(key)):
                 raise ValueError(f"context_handoff.noise_nudge.{key} must be a positive integer")
+
+        ratio = noise["read_file_min_ratio"]
+        if type(ratio) not in (float, int) or not 0 < ratio <= 1:
+            raise ValueError("context_handoff.noise_nudge.read_file_min_ratio must be in (0, 1]")
 
     for key in ("context_limit_rules", "model_tier_fallbacks"):
         rules = config.get(key)

@@ -28,5 +28,19 @@
         "timeout": 5
       }
     ]
+  },
+  "codex-read-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "^read_file$|^view_file$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./skills/codex-orchestrator/scripts/hook_read_guard.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

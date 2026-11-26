@@ -27,7 +27,7 @@ from codex_orch import handoff
 from codex_orch.context_hook import evaluate_context_hook
 from codex_orch.env import build_child_env, redact_secrets
 from codex_orch.host_adapter import is_safe_temp_or_config_path
-from codex_orch.profiles import load_profiles, resolve_context_handoff_config
+from codex_orch.profiles import DEFAULT_CONTEXT_HANDOFF, load_profiles, resolve_context_handoff_config
 sys.path.pop(0)
 
 SERVICE = "/product.v1.ConversationService/"
@@ -248,6 +248,56 @@ class HandoffFixture(unittest.TestCase):
 
 
 class TelemetryTests(HandoffFixture):
+    def test_fast_skip_keeps_unicode_escaped_early_rows(self):
+        escaped_checkpoint = json.dumps(checkpoint(2)).replace("CHECKPOINT", r"\u0043HECKPOINT")
+        escaped_planner = json.dumps(planner(1000, calls=[tool_call("read_file", Path="/fragment")]))
+        escaped_planner = escaped_planner.replace("PLANNER_RESPONSE", r"\u0050LANNER_RESPONSE")
+        self.write_transcript(planner(500, calls=[tool_call("read_file", Path="/old")]),
+                              escaped_checkpoint, escaped_planner, planner(26000))
+        result = telemetry.read_transcript_telemetry(self.transcript, tail_bytes=1)
+        self.assertEqual(result.checkpoint_epoch, 1)
+        self.assertEqual(result.read_file_count, 1)
+        self.assertTrue(result.last_turn_had_read_file)
+        self.assertEqual(result.last_turn_delta_tokens, 25000)
+
+    def test_read_hygiene_counts_bytes_duplicates_and_plugin_docs_per_epoch(self):
+        path = self.root / "data.txt"
+        path.write_bytes(b"x" * 100)
+        calls = [
+            tool_call("read_file", Path=str(path), StartLine=1),
+            tool_call("read_file", file_path=str(path.parent) + "/./data.txt", start_line=2, end_line=4),
+            tool_call("read_file", AbsolutePath=str(path), offset=1, limit=2),
+            tool_call("read_file", path="/work/.gemini/config/plugins/example/rules/AGENTS.md"),
+            tool_call("read_file", path="/work/.gemini/antigravity/builtin/skills/a/SKILL.md"),
+            tool_call("read_file", path="/work/codex-orchestrator/skills/a/references/example.md"),
+            tool_call("read_file", path="/work/handoff/packet.md"),
+            tool_call("read_file", path="/tmp/codex-orchestrator/draft.md"),
+            tool_call("invoke_subagent", TypeName="rEsEaRcH"),
+            tool_call("read_file", path="/missing.txt"),
+        ]
+        rows = (planner(500, cache=500, calls=calls), planner(16000, cache=10000))
+        self.write_transcript(*rows)
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 4)
+        self.assertEqual(result.read_file_unbounded_count, 2)
+        self.assertEqual(result.read_file_duplicate_count, 2)
+        self.assertEqual(result.read_file_est_bytes, 400)
+        self.assertEqual(result.plugin_doc_read_count, 3)
+        self.assertEqual(result.last_turn_delta_tokens, 25000)
+        self.assertTrue(result.last_turn_had_read_file)
+        self.assertEqual(result.reads_since_last_research, 1)
+        self.write_transcript(*rows, checkpoint(3), planner(900, calls=calls[:1]))
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 1)
+        self.assertEqual(result.read_file_unbounded_count, 1)
+        self.assertEqual(result.read_file_duplicate_count, 0)
+        self.assertEqual(result.read_file_est_bytes, 100)
+        self.assertEqual(result.plugin_doc_read_count, 0)
+        self.assertEqual(result.last_turn_delta_tokens, 0)
+        self.assertFalse(result.last_turn_had_read_file)
+        self.assertEqual(result.reads_since_last_research, 1)
+        self.assertEqual(result.invoked_subagents, ())
+
     def setUp(self):
         super().setUp()
         self.config = resolve_context_handoff_config(load_profiles(), environ=self.environ)
@@ -474,14 +524,21 @@ class TelemetryTests(HandoffFixture):
         profiles = load_profiles()
         context = profiles["context_handoff"]
         noise = context.pop("noise_nudge")
+        self.assertEqual(noise, DEFAULT_CONTEXT_HANDOFF["noise_nudge"])
+        self.assertEqual(noise, {
+            "enabled": True, "remote_cmd_threshold": 4, "remote_streak_threshold": 3,
+            "read_file_threshold": 6, "read_file_rearm_delta": 6,
+            "read_file_min_tokens": 45000, "read_file_min_ratio": 0.12, "read_spike_tokens": 25000,
+        })
         config_file.write_text(json.dumps(profiles), encoding="utf-8")
         legacy = load_profiles(config_file)
         self.assertEqual(resolve_context_handoff_config(legacy, environ={})["noise_nudge"], noise)
         invalid_values = {
             "enabled": 1, "remote_cmd_threshold": 0, "remote_streak_threshold": True,
-            "read_file_threshold": -1, "read_file_min_tokens": "80000",
+            "read_file_threshold": -1, "read_file_min_tokens": "45000",
+            "read_file_rearm_delta": 0, "read_file_min_ratio": 1.01, "read_spike_tokens": True,
         }
-        invalid_overrides = [None, [], {}]
+        invalid_overrides = [None, []]
         invalid_overrides.extend({**noise, key: value} for key, value in invalid_values.items())
         for override in invalid_overrides:
             with self.subTest(override=override):
@@ -489,9 +546,9 @@ class TelemetryTests(HandoffFixture):
                 config_file.write_text(json.dumps(profiles), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "context_handoff.noise_nudge"):
                     load_profiles(config_file)
-        config = resolve_context_handoff_config(
-            {"context_handoff": {"noise_nudge": {"enabled": False}}}, environ={},
-        )
+        context["noise_nudge"] = {"enabled": False}
+        config_file.write_text(json.dumps(profiles), encoding="utf-8")
+        config = resolve_context_handoff_config(load_profiles(config_file), environ={})
         self.assertEqual(config["noise_nudge"], {**noise, "enabled": False})
 
     def test_noise_overrides_and_explicit_mode(self):
@@ -548,6 +605,45 @@ class TelemetryTests(HandoffFixture):
 
 
 class EngineTests(HandoffFixture):
+    def test_runtime_snapshot_bounds_status_diff_worktrees_and_artifacts(self):
+        status = "\n".join(f" M {idx:02d}-" + "界" * 40 for idx in range(30))
+        diff = "\n".join(f"file-{idx:02d} | 1 +" for idx in range(32))
+        worktrees = [{"path": f"/work/{idx:02d}"} for idx in range(12)]
+        artifacts = self.root / "artifacts"
+        for idx in range(14):
+            child = artifacts / f"{idx:02d}"
+            child.mkdir(parents=True)
+            (child / "summary.json").write_text("{}")
+        for idx in range(16):
+            (self.transcript.parent / f"{idx:02d}.md").touch()
+        with mock.patch.object(handoff, "_git_root", return_value=self.workspace), \
+             mock.patch.object(handoff, "_git", return_value=mock.Mock(stdout=b"oid\nsubject")), \
+             mock.patch.object(handoff, "_git_text", side_effect=[diff, "main", status]), \
+             mock.patch.object(handoff, "_worktrees", return_value=worktrees):
+            snapshot = handoff.collect_runtime_snapshot(
+                workspaces=[self.workspace], artifact_dirs=[artifacts],
+                conversation_id=self.cid, app_data_dir=self.app,
+            )
+        workspace = snapshot["workspaces"][0]
+        status_lines = workspace["status_porcelain"].splitlines()
+        self.assertLessEqual(len(workspace["status_porcelain"].encode("utf-8")), 2048)
+        self.assertEqual(status_lines[:-1], status.splitlines()[:len(status_lines) - 1])
+        self.assertEqual(status_lines[-1],
+                         f"... ({31 - len(status_lines)} more lines truncated; run git status --short for full list)")
+        diff_lines = workspace["diff_stat"].splitlines()
+        self.assertEqual(diff_lines[:-1], diff.splitlines()[:24])
+        self.assertEqual(diff_lines[-1], "... (8 more lines truncated; run git diff --stat for full list)")
+        self.assertEqual(workspace["worktrees"], worktrees[:10] + [{"truncated_count": 2}])
+        self.assertEqual(len(snapshot["artifact_dirs"][0]["artifacts"]), 13)
+        self.assertEqual(snapshot["artifact_dirs"][0]["artifacts"][-1], {"truncated_count": 2})
+        self.assertEqual(len(snapshot["conversation_artifacts"]), 16)
+        self.assertEqual(snapshot["conversation_artifacts"][-1], "... (1 more conversation artifacts truncated)")
+
+    def test_small_snapshot_text_keeps_original_bytes(self):
+        for text in (" M tracked.txt", "先\r\nsecond\n"):
+            self.assertEqual(handoff._truncate_snapshot_text(
+                text, max_lines=25, max_bytes=2048, hint="full list"), text)
+
     def source(self, *, metadata=None, annotations=None, **legacy_fields):
         return {
             "id": self.cid,
@@ -610,13 +706,16 @@ class EngineTests(HandoffFixture):
         result = self.invoke("validate", "--packet", self.packet, shim=True)
         self.assertTrue(result["valid"])
         self.assertEqual(result["sections"], list(range(1, 9)))
+        maximum = (valid + "x" * (16384 - len(valid.encode("utf-8")))).encode("utf-8")
+        self.packet.write_bytes(maximum)
+        self.assertTrue(self.invoke("validate", "--packet", self.packet)["valid"])
         for case, content, message in (
             ("missing", self.packet_text(omit=8), "Missing packet section 8"),
             ("short section", self.packet_text(section2="Short"), "section 2 must have at least 10"),
             ("comment", valid + "\n<!-- fill this in -->", "unresolved HTML comments or placeholders"),
             ("placeholder", valid + "\n<TODO>", "unresolved HTML comments or placeholders"),
-            ("too small", "x" * 399, "400–24576 bytes"),
-            ("too large", valid.ljust(24577, "x"), "400–24576 bytes"),
+            ("too small", "x" * 399, "400–16384 bytes"),
+            ("too large", valid.ljust(16385, "x"), "400–16384 bytes"),
             ("missing working file", self.packet_text(section6=f"Open `{self.root / 'missing.py'}` now."),
              "Referenced path does not exist"),
             ("missing artifact", self.packet_text(section7=f"See [evidence]({self.root / 'missing.json'})."),
@@ -858,12 +957,14 @@ class EngineTests(HandoffFixture):
         ))
         read_step, sanity_step, resume_step, footer = prompt.splitlines()[-4:]
         self.assertTrue(read_step.startswith("1. "))
-        for fragment in ("并行", "read_file", str(packet), str(manifest_path), "第 6 节", "Active Working Set",
-                         "禁止预先扫描整个仓库或通读", str(self.transcript), "只在需要时查询"):
+        for fragment in ("本步仅用", "read_file", str(packet), "禁止再读 `handoff-manifest.json`",
+                         "禁止预读第 6 节", "Active Working Set", "扫描整个仓库或通读",
+                         "StartLine", "EndLine", ">= 3", "必须并行派发", 'TypeName="research"',
+                         str(self.transcript), "只在需要时查询"):
             self.assertIn(fragment, read_step)
-        self.assertTrue(sanity_step.startswith("2. "))
-        for fragment in ("3 秒", "git rev-parse HEAD", "git status --short", "第 9 节", "清单"):
-            self.assertIn(fragment, sanity_step)
+        self.assertNotIn(str(manifest_path), read_step)
+        self.assertEqual(sanity_step,
+                         "2. 在 3 秒内运行 `git rev-parse HEAD` 和 `git status --short`，与第 9 节快照核对。")
         self.assertTrue(resume_step.startswith("3. auto"))
         for fragment in ("第 1 节约束", "第 2 节", "Immediate Next Atomic Action", "无需重复确认",
                          "remote-runner", "research", "首轮即并行派发"):
@@ -1140,15 +1241,66 @@ class HookTests(HandoffFixture):
         self.assert_nudge(self.hook(), "remote_noise", "remote-runner")
 
     def test_read_noise_requires_both_thresholds_and_skips_existing_research(self):
-        for plan in (self.noise_plan(79999, reads=12), self.noise_plan(reads=11),
-                     self.noise_plan(reads=12, subagent="Research")):
+        for plan in (self.noise_plan(30719, reads=6), self.noise_plan(reads=5),
+                     self.noise_plan(reads=6, subagent="Research")):
             self.write_transcript(plan)
             self.assertEqual(self.hook(), {})
-        self.write_transcript(self.noise_plan(reads=12, subagent="Research"),
-                              checkpoint(2), self.noise_plan(reads=12))
-        self.assert_nudge(self.hook(), "read_noise", "12 次", "80,000 tokens", "research")
+        self.write_transcript(self.noise_plan(reads=6, subagent="Research"),
+                              checkpoint(2), self.noise_plan(reads=6))
+        self.assert_nudge(self.hook(), "read_noise", "6 次", "80,000 tokens", "research",
+                          "6 次未限定范围", "请停止继续整文件 read_file", "StartLine/EndLine")
         self.assertEqual(self.hook(), {})
         self.assertEqual(self.state()["fired_nudges"], ["read_noise"])
+
+    def test_read_noise_model_relative_floor(self):
+        for epoch, (model, floor) in enumerate(
+            (("gpt-oss-120b", 9600), ("gemini-3-1-pro-high", 15360))
+        ):
+            with self.subTest(model=model):
+                prefix = [checkpoint(index) for index in range(epoch)]
+                for tokens in (floor - 1, floor):
+                    row = self.noise_plan(tokens, reads=6)
+                    row["model"] = model
+                    self.write_transcript(*prefix, row)
+                    result = self.hook(modelName=model)
+                    if tokens == floor:
+                        self.assert_nudge(result, "read_noise", f"{floor:,} tokens")
+                    else:
+                        self.assertEqual(result, {})
+
+    def test_read_noise_spike_requires_previous_counted_read(self):
+        for previous, tokens in ((planner(1000), 26000), (self.noise_plan(1000, reads=1), 25999)):
+            self.write_transcript(previous, planner(tokens))
+            self.assertEqual(self.hook(), {})
+        self.write_transcript(self.noise_plan(1000, reads=1), planner(26000))
+        self.assert_nudge(self.hook(), "read_noise", "单步激增 +25,000 tokens", "1 次")
+
+    def test_read_noise_rearms_six_reads_after_ignored_l1_and_resets(self):
+        self.write_transcript(self.noise_plan(40000, reads=8))
+        self.assert_nudge(self.hook(), "read_noise", "8 次")
+        self.assertEqual(self.state()["read_noise_l1_reads"], 8)
+        self.write_transcript(self.noise_plan(40000, reads=13))
+        self.assertEqual(self.hook(), {})
+        self.write_transcript(self.noise_plan(40000, reads=14))
+        self.assert_nudge(self.hook(), "read_noise_l2", "14 次", "40,000 tokens", "200K", "rg/python3")
+        self.assertEqual(self.hook(), {})
+        self.write_transcript(checkpoint(2), planner(40000))
+        self.assertEqual(self.hook(), {})
+        self.assertNotIn("read_noise_l1_reads", self.state())
+        self.assertEqual(self.state()["fired_nudges"], [])
+        self.write_transcript(checkpoint(2), self.noise_plan(40000, reads=6))
+        self.assert_nudge(self.hook(), "read_noise", "6 次")
+
+    def test_read_noise_rearms_after_drift_since_most_recent_research(self):
+        prefix = [self.noise_plan(40000, reads=20, subagent="Research"),
+                  self.noise_plan(40000, reads=11, subagent="RESEARCH")]
+        for tokens, reads in ((40000, 11), (30719, 12)):
+            self.write_transcript(*prefix, self.noise_plan(tokens, reads=reads))
+            self.assertEqual(self.hook(), {})
+        self.write_transcript(*prefix, self.noise_plan(40000, reads=12))
+        self.assert_nudge(self.hook(), "read_noise_l2", "43 次", "12 次", "40,000 tokens")
+        self.assertEqual(self.state()["fired_nudges"], ["read_noise_l2"])
+        self.assertEqual(self.hook(), {})
 
     def test_vertical_then_remote_then_read_each_inject_once(self):
         self.write_transcript(self.noise_plan(120000, remote=4, reads=12))
