@@ -239,6 +239,32 @@ class DispatchTests(unittest.TestCase):
         for text in ("\nHOSTS / GPUS\n", "\nEXECUTION_ORDER\n", "MEM_MB", "EXT_BUSY"):
             self.assertIn(text, stdout.getvalue())
 
+    def test_start_and_add_tasks_table_receipts(self):
+        self.config([self.task("job", 100, allowed_hosts=["a"])])
+        with patch("codex_orch.remote.controller.RemoteController", return_value=self.controller), \
+                patch.object(self.controller, "_spawn", return_value=4321), \
+                patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(main(["start", "--cluster", str(self.cluster), "--manifest", str(self.manifest),
+                                   "--run-dir", str(self.run_dir), "--format", "table"]), 0)
+        fields, tables = stdout.getvalue().split("\nHOSTS\n", 1)
+        self.assertIn("controller_pid", fields)
+        self.assertNotIn("host_gpu_summary", fields)
+        self.assertNotIn("dispatched", fields)
+        hosts, dispatched = tables.split("\nDISPATCHED\n", 1)
+        self.assertEqual(hosts.splitlines()[0].split(), ["HOST", "STATE", "FREE", "LEASED", "DISK_GB", "DRAINING_FOR"])
+        self.assertEqual([row.split() for row in dispatched.splitlines()],
+                         [["TASK_ID", "HOST", "GPUS", "ATTEMPT", "PGID"], ["job", "a", "0", "1", "2001"]])
+
+        payload = self.root / "additional.json"
+        payload.write_text(json.dumps([self.task("added", depends_on=["job"])]))
+        stdout = self.shim("add-tasks", "--run-dir", self.run_dir, "--tasks", payload, "--format", "table")
+        fields, tables = stdout.split("\nHOSTS\n", 1)
+        self.assertIn('["added"]', fields)
+        self.assertNotIn("host_gpu_summary", fields)
+        self.assertNotIn('"attempt_dir"', stdout)
+        _, tasks = tables.split("\nTASKS\n", 1)
+        self.assertEqual(tasks.splitlines()[1].split()[:2], ["added", "pending"])
+
     def test_add_tasks_live_and_invalid_payloads_leave_run_files_unchanged(self):
         self.config([self.task("completed"), self.task("cancelled", 100), self.task("live", 100)])
         self.initialize()
@@ -306,6 +332,57 @@ class DispatchTests(unittest.TestCase):
         existing = self.status()["tasks"]["existing"]
         self.assertEqual((existing["state"], existing["completed_host"], existing["attempts"]),
                          ("completed", "b", []))
+
+    def test_cross_host_marker_precheck_cascades_before_relay_or_launch(self):
+        self.config([
+            self.task("upstream", allowed_hosts=["b"], done_markers=["done"]),
+            self.task("downstream", allowed_hosts=["a"], depends_on=["upstream"], done_markers=["done"],
+                      relay_inputs=[{"from_task": "upstream", "rel_path": "artifact", "target_rel_path": "artifact"}]),
+            self.task("final", allowed_hosts=["b"], depends_on=["downstream"], done_markers=["done"]),
+        ])
+        for upstream_exists in (True, False):
+            with self.subTest(upstream_exists=upstream_exists):
+                self.run_dir = self.root / str(upstream_exists)
+                self.initialize()
+                markers = {"downstream", "final"}
+                if upstream_exists:
+                    markers.add("upstream")
+                requests = {}
+
+                def probe(transport, host, active, *, marker_checks):
+                    requests[host.id] = [check["task_id"] for check in marker_checks]
+                    snapshot = transport.probe(host, active)
+                    snapshot.existing_done_tasks = [task_id for task_id in requests[host.id] if task_id in markers]
+                    return snapshot
+
+                self.controller.probe_fn = probe
+                with patch.object(self.transport, "relay_file", create=True) as relay, \
+                        patch.object(self.transport, "launch_detached", wraps=self.transport.launch_detached) as launch:
+                    receipt = self.tick()
+                relay.assert_not_called()
+                self.assertEqual(requests, {"a": ["downstream"], "b": ["upstream", "final"]})
+                tasks = self.status()["tasks"]
+                events = [json.loads(line) for line in (self.run_dir / "events.jsonl").read_text().splitlines()]
+                completions = [event for event in events if event["kind"] == "task_completed"]
+                if upstream_exists:
+                    launch.assert_not_called()
+                    self.assertTrue(receipt["terminal"])
+                    self.assertEqual(receipt["dispatched"], [])
+                    expected = [("upstream", "b"), ("downstream", "a"), ("final", "b")]
+                    self.assertEqual([(event["task_id"], event["host_id"]) for event in completions], expected)
+                    for event in completions:
+                        self.assertEqual(event["details"], {"attempt": 0, "skipped_existing": True, "prechecked": True})
+                    for task_id, host_id in expected:
+                        task = tasks[task_id]
+                        self.assertEqual((task["state"], task["completed_host"], task["attempts"]),
+                                         ("completed", host_id, []))
+                else:
+                    launch.assert_called_once()
+                    self.assertFalse(receipt["terminal"])
+                    self.assertEqual([row["task_id"] for row in receipt["dispatched"]], ["upstream"])
+                    self.assertEqual(completions, [])
+                    for task_id in ("downstream", "final"):
+                        self.assertEqual((tasks[task_id]["state"], tasks[task_id]["attempts"]), ("pending", []))
 
     def _configure_relay(self, target_host):
         self.config([
@@ -1056,7 +1133,7 @@ class SchedulerCoreTests(unittest.TestCase):
         hosts = [self.host(), self.host("b", mirror_root=str(self.root / "mirror"))]
         cluster, _, specs, state = self.runtime(hosts, [
             TaskSpec("upstream", "true", done_markers=("nested/result", "summary"), pull_max_mb=32),
-            TaskSpec("downstream", "true", depends_on=("upstream",)),
+            TaskSpec("downstream", "true", depends_on=("upstream",), done_markers=("done",)),
             TaskSpec("no_markers", "true"),
         ])
 
@@ -1081,17 +1158,18 @@ class SchedulerCoreTests(unittest.TestCase):
         (out_dir / "summary").touch()
         snapshot = probe_host(ProbeTransport(), cpu_host, [], marker_checks=marker_checks)
         self.assertEqual(snapshot.existing_done_tasks, ["upstream"])
-        snapshot.existing_done_tasks.extend(["unknown", "no_markers", "upstream"])
+        snapshot.existing_done_tasks[:0] = ["downstream", "unknown", "no_markers", "upstream"]
         _, pulls, events = reconcile_host_probe(state, cluster, specs, snapshot, 2)
         self.assertEqual([(event.kind, event.task_id) for event in events],
-                         [("task_completed", "upstream"), ("task_ready", "downstream")])
+                         [("task_completed", "upstream"), ("task_ready", "downstream"),
+                          ("task_completed", "downstream")])
         self.assertEqual(events[0].details, {"attempt": 0, "skipped_existing": True, "prechecked": True})
         self.assertEqual(state.tasks["upstream"].attempts, [])
         self.assertEqual(state.tasks["upstream"].completed_host, "b")
         self.assertEqual(state.tasks["upstream"].completed_out_dir, str(out_dir))
-        self.assertEqual(state.tasks["downstream"].state, "ready")
+        self.assertEqual(state.tasks["downstream"].state, "completed")
         self.assertEqual(state.tasks["no_markers"].state, "ready")
-        self.assertEqual(len(pulls), 1)
+        self.assertEqual([pull.task_id for pull in pulls], ["upstream", "downstream"])
         self.assertEqual((pulls[0].attempt, pulls[0].host_id, pulls[0].mirror_root, pulls[0].pull_max_mb),
                          (0, "b", hosts[1].mirror_root, 32))
         self.assertEqual(pulls[0].pull_excludes, list(specs["upstream"].pull_excludes))

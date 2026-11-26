@@ -32,7 +32,8 @@ from .models import (
 from .scheduler import (
     PreemptAction, PullAction, SchedulerEvent, _downstream_counts, _finish_failure, advance_dag_states,
     build_summary, compute_free_gpus, init_run_state, is_run_terminal,
-    mark_dispatch_launch_failed, mark_dispatch_started, plan_dispatches, reconcile_host_probe,
+    mark_dispatch_launch_failed, mark_dispatch_started, plan_dispatches, reconcile_existing_done_tasks,
+    reconcile_host_probe,
     mark_relay_failed, mark_task_relaying, needs_cross_host_relay,
 )
 from .ssh_transport import RelayError, SshTransport
@@ -455,7 +456,7 @@ class RemoteController:
                     {"task_id": task.id, "done_markers": list(task.done_markers),
                      "out_dir": f"{host.work_root.rstrip('/')}/{state.run_id}/outputs/{task.id}"}
                     for task in manifest.tasks
-                    if state.tasks[task.id].state == "ready" and task.done_markers
+                    if state.tasks[task.id].state in ("ready", "pending") and task.done_markers
                     and not state.tasks[task.id].attempts and host_matches_task_static(host, task)[0]
                 ]
 
@@ -468,7 +469,9 @@ class RemoteController:
             pending_dag = [task_id for task_id, runtime in state.tasks.items() if runtime.state == "pending"]
             now = self.clock()
             for snapshot in snapshots:
-                kills, transfers, changes = reconcile_host_probe(state, cluster, tasks, snapshot, now)
+                kills, transfers, changes = reconcile_host_probe(
+                    state, cluster, tasks, snapshot, now, defer_existing_done=True,
+                )
                 for event in changes:
                     if event.kind == "task_completed" and not event.details.get("prechecked"):
                         payload = snapshot.attempts[event.task_id].done_payload
@@ -517,6 +520,9 @@ class RemoteController:
                 elif action.reason not in _WATCHDOG_REASONS:
                     state.tasks[action.task_id] = pending[action.task_id]
                     kill_events.append(deferred[action.task_id])
+            # A preemption can change dependency eligibility only after the kill is confirmed.
+            transfers, events = reconcile_existing_done_tasks(state, cluster, tasks, snapshots, now)
+            pulls.extend(transfers)
             # The scheduler records an outage after three failures. Only dispatch to
             # hosts whose most recent observation succeeded, including during that grace period.
             unavailable = [host for host in state.hosts.values() if host.consecutive_probe_failures]
@@ -526,7 +532,7 @@ class RemoteController:
             assignments, changes = plan_dispatches(state, cluster, tasks, state.run_id, now)
             for host, preflight_ok in zip(unavailable, saved):
                 host.preflight_ok = preflight_ok
-            self._persist(run_dir, cluster, state, kill_events + changes)
+            self._persist(run_dir, cluster, state, kill_events + events + changes)
 
         dispatched = []
         for assignment in assignments:
@@ -1111,9 +1117,12 @@ def _emit(result: dict[str, Any], output_format: str) -> None:
     hosts = result.get("host_gpu_summary")
     live_plan = hosts is not None and "execution_order" in result
     status = hosts is not None and not live_plan and isinstance(result.get("tasks"), dict)
+    start_receipt = hosts is not None and not live_plan and not status and isinstance(result.get("dispatched"), list)
     sections = {"host_gpu_summary", "execution_order"} if live_plan else set()
     if status:
         sections.update(("hosts", "host_gpu_summary", "tasks", "pulled_tasks"))
+    if start_receipt:
+        sections.update(("host_gpu_summary", "dispatched"))
     print(f"{'FIELD':<24} VALUE")
     for key, value in result.items():
         if key not in sections:
@@ -1126,13 +1135,20 @@ def _emit(result: dict[str, Any], output_format: str) -> None:
             for host_id, host in sorted(hosts.items()) for gpu in (host.get("gpus") or [{}])
         ])
         _table("EXECUTION_ORDER", ("TASK_ID",), [(tid,) for tid in result["execution_order"]])
-    if status:
+    if status or start_receipt:
         _table("HOSTS", ("HOST", "STATE", "FREE", "LEASED", "DISK_GB", "DRAINING_FOR"), [
             (host_id, host["state"], ",".join(map(str, host["free_gpu_ids"])) or "-",
              ",".join(map(str, host["leased_gpu_ids"])) or "-", host.get("disk_free_gb"),
              host.get("draining_for"))
             for host_id, host in sorted(hosts.items())
         ])
+    if start_receipt:
+        _table("DISPATCHED", ("TASK_ID", "HOST", "GPUS", "ATTEMPT", "PGID"), [
+            (item["task_id"], item["host_id"], ",".join(map(str, item.get("gpu_ids", []))) or "-",
+             item["attempt"], item["pgid"])
+            for item in result["dispatched"]
+        ])
+    if status:
         rows = []
         for task_id, task in sorted(result["tasks"].items()):
             attempts = task["attempts"]

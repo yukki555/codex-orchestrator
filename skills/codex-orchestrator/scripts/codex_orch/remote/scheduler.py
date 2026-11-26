@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from .models import (
     TERMINAL_TASK_STATES,
@@ -351,9 +351,46 @@ def _reconcile_external(
             ))
 
 
+def reconcile_existing_done_tasks(
+    state: RunState, cluster: ClusterConfig, tasks_by_id: dict[str, TaskSpec],
+    snapshots: Sequence[HostProbeSnapshot], now: float,
+) -> tuple[list[PullAction], list[SchedulerEvent]]:
+    """Apply observed markers as their tasks become ready through DAG promotion."""
+    pulls: list[PullAction] = []
+    events = advance_dag_states(state, tasks_by_id, now)
+    observations = [(cluster.hosts[snapshot.host_id], dict.fromkeys(snapshot.existing_done_tasks))
+                    for snapshot in snapshots if snapshot.ok and snapshot.existing_done_tasks]
+    while observations:
+        previous_count = len(events)
+        for host, task_ids in observations:
+            for task_id in task_ids:
+                task = tasks_by_id.get(task_id)
+                runtime = state.tasks.get(task_id)
+                if task is None or not task.done_markers or runtime is None or runtime.state != "ready":
+                    continue
+                if any(attempt.state in ("running", "cancelling") for attempt in runtime.attempts):
+                    continue
+                out_dir = f"{host.work_root.rstrip('/')}/{state.run_id}/outputs/{task_id}"
+                runtime.state = "completed"
+                runtime.completed_host = host.id
+                runtime.completed_out_dir = out_dir
+                events.append(SchedulerEvent(now, "task_completed", task_id, host.id, {
+                    "attempt": 0, "skipped_existing": True, "prechecked": True,
+                }))
+                if task.pull_to_local or host.mirror_root:
+                    pulls.append(PullAction(
+                        task_id, 0, host.id, out_dir, host.mirror_root,
+                        task.pull_to_local, list(task.pull_excludes), task.pull_max_mb,
+                    ))
+        if len(events) == previous_count:
+            break
+        events.extend(advance_dag_states(state, tasks_by_id, now))
+    return pulls, events
+
+
 def reconcile_host_probe(
     state: RunState, cluster: ClusterConfig, tasks_by_id: dict[str, TaskSpec],
-    snapshot: HostProbeSnapshot, now: float,
+    snapshot: HostProbeSnapshot, now: float, *, defer_existing_done: bool = False,
 ) -> tuple[list[PreemptAction], list[PullAction], list[SchedulerEvent]]:
     """Apply a probe. Execute returned preemptions before launching replacements."""
     host = cluster.hosts[snapshot.host_id]
@@ -387,26 +424,12 @@ def reconcile_host_probe(
         )
     managed_gpus = {gpu for _, _, attempt in _active_on(state, host.id) for gpu in attempt.gpu_ids}
     _reconcile_external(state, host, host_rt, tasks_by_id, managed_gpus, now, preempts, events)
-    for task_id in dict.fromkeys(snapshot.existing_done_tasks):
-        task = tasks_by_id.get(task_id)
-        runtime = state.tasks.get(task_id)
-        if task is None or not task.done_markers or runtime is None or runtime.state != "ready":
-            continue
-        if any(attempt.state in ("running", "cancelling") for attempt in runtime.attempts):
-            continue
-        out_dir = f"{host.work_root.rstrip('/')}/{state.run_id}/outputs/{task_id}"
-        runtime.state = "completed"
-        runtime.completed_host = host.id
-        runtime.completed_out_dir = out_dir
-        events.append(SchedulerEvent(now, "task_completed", task_id, host.id, {
-            "attempt": 0, "skipped_existing": True, "prechecked": True,
-        }))
-        if task.pull_to_local or host.mirror_root:
-            pulls.append(PullAction(
-                task_id, 0, host.id, out_dir, host.mirror_root,
-                task.pull_to_local, list(task.pull_excludes), task.pull_max_mb,
-            ))
-    events.extend(advance_dag_states(state, tasks_by_id, now))
+    if defer_existing_done:
+        events.extend(advance_dag_states(state, tasks_by_id, now))
+    else:
+        transfers, changes = reconcile_existing_done_tasks(state, cluster, tasks_by_id, (snapshot,), now)
+        pulls.extend(transfers)
+        events.extend(changes)
     return preempts, pulls, events
 
 
