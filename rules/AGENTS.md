@@ -1,4 +1,4 @@
-# Codex Orchestrator — Dual-Brain Global Policy (v3.9)
+# Codex Orchestrator — Dual-Brain Global Policy (v4.0)
 
 Pair **Gemini** (Manager, Corpus Collector, Verifier) with **local Codex CLI** (Implementer, Reviewer, Red-Team Analyst) using a **Fold-First** cost ladder:
 

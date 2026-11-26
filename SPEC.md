@@ -1,4 +1,4 @@
-# Codex Orchestrator Behavioral Specification (`v3.9.0`)
+# Codex Orchestrator Behavioral Specification (`v4.0.0`)
 
 This document defines the stable **Session / Hands** behavioral invariants and conformance contract for `codex-orchestrator`. Orchestration policies and prompts live in the disposable **Brain** layer (`rules/`, `skills/`).
 

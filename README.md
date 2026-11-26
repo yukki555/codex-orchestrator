@@ -6,10 +6,10 @@
 
 **Dual-Brain Engineering, Research, Session Continuity & Multi-Server GPU Orchestration for Google Antigravity**
 
-[![Version](https://img.shields.io/badge/version-v3.9.0-3B82F6?style=flat-square)](./plugin.json)
+[![Version](https://img.shields.io/badge/version-v4.0.0-3B82F6?style=flat-square)](./plugin.json)
 [![Python](https://img.shields.io/badge/python-3.9%2B%20stdlib%20only-10B981?style=flat-square)](#-requirements--installation)
 [![Components](https://img.shields.io/badge/skills-9%20%7C%20agents%202%20%7C%20hooks%203-0F172A?style=flat-square)](#-skills--agents)
-[![Conformance](https://img.shields.io/badge/tests-224%20passing-10B981?style=flat-square)](#-verification--conformance)
+[![Conformance](https://img.shields.io/badge/tests-229%20passing-10B981?style=flat-square)](#-verification--conformance)
 [![Spec](https://img.shields.io/badge/spec-SPEC.md-6366F1?style=flat-square)](./SPEC.md)
 
 [Architecture](#-architecture) · [Quick Start](#-quick-start) · [Skills & Agents](#-skills--agents) · [GPU Master Scheduler](#-multi-server-gpu-master-scheduler-dispatch) · [Session Handoff](#-context-hygiene--session-handoff-handoff) · [Verification](#-verification--conformance) · [Changelog](#-release-history)
@@ -20,7 +20,7 @@
 
 ## Overview
 
-**Codex Orchestrator** (`v3.9.0`) is a zero-dependency **Dual-Brain** plugin for **Google Antigravity** that pairs:
+**Codex Orchestrator** (`v4.0.0`) is a zero-dependency **Dual-Brain** plugin for **Google Antigravity** that pairs:
 
 - **Gemini** as **Principal Manager, Corpus Collector & Verifier** — owns specifications, objective artifact inspection, host-side Proof-of-Work, and synthesis.
 - **Local OpenAI Codex CLI** as **Staff Implementer, Independent Reviewer & Red-Team Analyst** — executes scoped patches in isolated worktrees, structured reviews, parallel DAG tasks, and blind critiques.
@@ -211,7 +211,7 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 | Path | Role |
 | :--- | :--- |
-| [`plugin.json`](./plugin.json), [`assets/logo.svg`](./assets/logo.svg) | Antigravity plugin manifest (`v3.9.0`) and brand icon |
+| [`plugin.json`](./plugin.json), [`assets/logo.svg`](./assets/logo.svg) | Antigravity plugin manifest (`v4.0.0`) and brand icon |
 | [`SPEC.md`](./SPEC.md) | Formal behavioral specification (exit codes, patch custody, Proof-of-Work, TDD, handoff, and remote GPU scheduler) |
 | [`TODO.md`](./TODO.md) | Roadmap and milestone tracking |
 | [`hooks.json`](./hooks.json) | Root `PreToolUse` (`codex-delegate-guard`, `codex-read-guard`) and `PreInvocation` + `Stop` (`codex-context-handoff`) registrations |
@@ -228,9 +228,9 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 ## Release History
 
-### `v3.9.0` & Remote Master Scheduler (Milestones 1 & 2)
+### `v4.0.0` — Remote Multi-Server GPU/PPU Master Scheduler
 
-- **Remote Multi-Server GPU Master Scheduler (`/dispatch`, `remote_dispatch.sh`)**: Full hub-and-spoke dynamic scheduler with ControlMaster pooling, LPT + critical-path work-stealing, DSW/Docker PID-namespace external GPU accounting, multi-GPU gang reservation (`draining_for`), live `add-tasks` injection, cross-host `done_markers` pre-check, `stall_timeout_s` watchdog, resumable SHA256 `relay_inputs`, `mirror_root` + lightweight pull-back, readable `--format table` views, `stop --kill-remote` state cleanup, and `/handoff` Section 9 `dispatch_runs` snapshots.
+- **Remote Multi-Server GPU/PPU Master Scheduler (`/dispatch`, `remote_dispatch.sh`)**: Full hub-and-spoke dynamic scheduler with ControlMaster pooling, LPT + critical-path work-stealing, NVIDIA GPU and Alibaba PPU (`PPU-ZW810E`) probing with allowlisted `host.env` and `/dev/alixpu_ppu`, DSW/Docker PID-namespace accounting for external accelerator usage, multi-GPU gang reservation (`draining_for`), live `add-tasks` injection, a multi-layer cross-host `done_markers` pre-check cascade, `stall_timeout_s` watchdog, resumable SHA256 `relay_inputs`, `mirror_root` + lightweight pull-back, readable `--format table` views, `stop --kill-remote` state cleanup, and `/handoff` Section 9 `dispatch_runs` snapshots.
 - **Context Hygiene (`v3.9.0`)**: Slim cold-start policy and skills (`cli-reference.md` offload), two-tier `read_noise` nudges, `codex-read-guard` `PreToolUse` hook, and errored-read telemetry exclusion.
 
 <details>

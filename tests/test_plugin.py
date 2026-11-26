@@ -95,7 +95,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIsInstance(plugin, dict)
         self.assertEqual(plugin["name"], "codex-orchestrator")
         self.assertEqual(plugin["displayName"], "Codex Orchestrator")
-        self.assertEqual(plugin["version"], "3.9.0")
+        self.assertEqual(plugin["version"], "4.0.0")
         self.assertEqual(json.loads(PROFILES.read_text(encoding="utf-8"))["version"], plugin["version"])
         self.assertEqual(plugin["logo"], "assets/logo.svg")
         self.assertTrue((ROOT / plugin["logo"]).is_file())
@@ -353,7 +353,7 @@ class AntigravityPluginTests(unittest.TestCase):
                 "深度调研 / 红队辩论 / 实验核查",
             ),
             RULES: ("Communication Charter v3.2", "Dynamic Structure Routing", charter.name),
-            ROOT / "README.md": ("v3.9.0", "Communication Charter v3.2", charter.name),
+            ROOT / "README.md": ("v4.0.0", "Communication Charter v3.2", charter.name),
             SKILLS / "codex-orchestrator" / "SKILL.md": ("Communication Charter v3.2", charter.name),
             SKILLS / "impl" / "SKILL.md": ("Communication Charter v3.2", "lightweight route", charter.name),
             SKILLS / "review" / "SKILL.md": ("Communication Charter v3.2", "review", charter.name),

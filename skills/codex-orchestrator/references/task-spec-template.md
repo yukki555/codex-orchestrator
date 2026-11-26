@@ -1,4 +1,4 @@
-# Task Spec Template (GPT-6.2 Tuned, v3.9)
+# Task Spec Template (GPT-6.2 Tuned, v4.0)
 
 Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec.md` (and keep per-worker Specs focused at ~3–4 KB by placing shared cross-module interfaces in `/tmp/codex-orchestrator/<task-id>/contract.md`) before dispatching to `codex-worker`, `run_codex.sh`, or `run_codex_parallel.sh`.
 

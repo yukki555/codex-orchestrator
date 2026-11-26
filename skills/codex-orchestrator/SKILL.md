@@ -3,7 +3,7 @@ name: codex-orchestrator
 description: Orchestrate local OpenAI Codex CLI, isolated workers, native research and remote-runner, verified patches, and session handoff.
 ---
 
-# Codex Orchestrator (v3.9)
+# Codex Orchestrator (v4.0)
 
 ## Fold-First Routing
 

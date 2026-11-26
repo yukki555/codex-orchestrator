@@ -1,6 +1,6 @@
 # Codex Orchestrator — Backlog & TODO
 
-## Remote Multi-Server Master Scheduler (Milestones 1 & 2 Completed)
+## Remote Multi-Server Master Scheduler (`v4.0.0` — Completed)
 
 - [x] Ship the external inventory and host-agnostic DAG manifest, SSH preflight, and dynamic GPU scheduling with co-tenancy controls.
 - [x] Ship detached Launch-Verify-Return, reconnect and adoption, local status and live controls, and lightweight result pull-back through `/dispatch`.
