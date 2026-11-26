@@ -17,6 +17,9 @@ class ValidationError(ValueError):
     """A configuration, state, or command template could not be validated."""
 
 
+ConfigError = ValidationError
+
+
 VALID_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 VALID_SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:@[A-Za-z0-9_.:-]+)?$")
 SAFE_SSH_OPTION_KEYS = frozenset({
@@ -28,7 +31,7 @@ DEFAULT_PULL_EXCLUDES = ("*.pt", "*.pth", "*.ckpt", "*.npy", "*.bin", "*.safeten
 TERMINAL_TASK_STATES = frozenset({"completed", "failed", "blocked_dep", "cancelled"})
 _BUILTINS = frozenset({
     "task_id", "run_id", "out_dir", "attempt_dir", "gpu_ids", "num_gpus",
-    "host_id", "work_root",
+    "host_id", "work_root", "inputs_dir",
 })
 _TEMPLATE_TOKEN = re.compile(r"\{\{|\}\}|\{([A-Za-z0-9_.-]+)\}")
 _REFERENCES = Path(__file__).parent.parent.parent.parent / "references"
@@ -229,6 +232,8 @@ class RelayInput(_JsonRecord):
     def __post_init__(self) -> None:
         _validate_id(self.from_task, "relay source task ID")
         _validate_path(self.rel_path, "relay rel_path")
+        if self.max_bytes is not None and (type(self.max_bytes) is not int or self.max_bytes < 1):
+            raise ConfigError("Relay max_bytes must be a positive integer")
         if self.target_rel_path is not None:
             _validate_path(self.target_rel_path, "relay target_rel_path")
 
@@ -284,6 +289,10 @@ class TaskSpec(_JsonRecord):
     def __post_init__(self) -> None:
         _validate_id(self.id, "task ID")
         self.gpus = _integer(self.gpus, "gpus", 0)
+        for name in ("timeout_s", "stall_timeout_s"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ConfigError(f"{name} must be a positive integer")
         for name in ("requires_tags", "excluded_hosts", "depends_on", "done_markers", "pull_excludes"):
             setattr(self, name, tuple(getattr(self, name)))
         if self.allowed_hosts is not None:
@@ -359,6 +368,7 @@ class DispatchManifest(_JsonRecord):
     run_id: str | None = None
     sync: SyncConfig | None = None
     preflight: PreflightConfig | None = None
+    defaults: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.tasks = tuple(
@@ -382,7 +392,7 @@ class DispatchManifest(_JsonRecord):
             for key, model in (("sync", SyncConfig), ("preflight", PreflightConfig)):
                 if fields.get(key) is not None:
                     fields[key] = model.from_dict(fields[key])
-            return cls(**fields)
+            return cls(defaults=defaults, **fields)
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValidationError(f"Invalid dispatch manifest: {exc}") from exc
 
@@ -396,6 +406,8 @@ class DispatchManifest(_JsonRecord):
             value = getattr(self, name)
             if value is not None:
                 data[name] = value if name == "run_id" else value.to_dict()
+        if self.defaults:
+            data["defaults"] = _json_value(self.defaults)
         return data
 
 
@@ -416,6 +428,8 @@ class AttemptProbeStatus(_JsonRecord):
     done_markers_present: bool = False
     log_tail: str = ""
     attempt: int | None = None
+    log_size: int | None = None
+    log_mtime: float | None = None
 
 
 @dataclass
@@ -427,6 +441,7 @@ class HostProbeSnapshot(_JsonRecord):
     disk_free_gb: float | None = None
     gpus: list[GpuSlotSnapshot] = field(default_factory=list)
     attempts: dict[str, AttemptProbeStatus] = field(default_factory=dict)
+    existing_done_tasks: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.gpus = _gpu_snapshots(self.gpus)
@@ -453,6 +468,10 @@ class TaskAttempt(_JsonRecord):
     finished_at: float | None = None
     exit_code: int | None = None
     failure_kind: str | None = None
+    last_activity_at: float | None = None
+    last_log_size: int | None = None
+    last_log_mtime: float | None = None
+    cancel_reason: str | None = None
 
 
 @dataclass
@@ -496,6 +515,7 @@ class HostRuntime(_JsonRecord):
     next_probe_at: float = 0
     disk_full: bool = False
     gpus: list[GpuSlotSnapshot] = field(default_factory=list)
+    draining_since: float | None = None
 
     def __post_init__(self) -> None:
         self.gpus = _gpu_snapshots(self.gpus)
@@ -537,28 +557,30 @@ def _reject_constant(token: str) -> None:
     raise ValidationError(f"Invalid JSON constant: {token}")
 
 
+def _read_json(path: str | Path) -> Any:
+    try:
+        return json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            parse_constant=_reject_constant,
+            parse_float=_finite_json_float,
+        )
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValidationError(f"Invalid configuration {path}: {exc}") from exc
+
+
 def _read_validated(
     path: str | Path, schema_path: Path, *, merge_defaults: bool = False,
 ) -> dict[str, Any]:
     schema, error = preflight_schema(schema_path)
     if error:
         raise ValidationError(error)
-    try:
-        data = json.loads(
-            Path(path).read_text(encoding="utf-8"),
-            parse_constant=_reject_constant,
-            parse_float=_finite_json_float,
-        )
-        if not isinstance(data, dict) or not matches_schema(data, schema):
-            raise ValidationError(f"{path} does not match JSON Schema {schema_path.name}")
-        if merge_defaults and data.get("defaults"):
-            effective = {**data, "tasks": [_merged_task(data["defaults"], task) for task in data["tasks"]]}
-            if not matches_schema(effective, schema):
-                raise ValidationError(f"Merged tasks do not match JSON Schema {schema_path.name}")
-            data = effective
-            del data["defaults"]
-    except (OSError, ValueError, RecursionError) as exc:
-        raise ValidationError(f"Invalid configuration {path}: {exc}") from exc
+    data = _read_json(path)
+    if not isinstance(data, dict) or not matches_schema(data, schema):
+        raise ValidationError(f"{path} does not match JSON Schema {schema_path.name}")
+    if merge_defaults and data.get("defaults"):
+        effective = {**data, "tasks": [_merged_task(data["defaults"], task) for task in data["tasks"]]}
+        if not matches_schema(effective, schema):
+            raise ValidationError(f"Merged tasks do not match JSON Schema {schema_path.name}")
     return data
 
 
@@ -570,6 +592,31 @@ def load_cluster_config(path: str | Path, schema_path: Path | None = None) -> Cl
 def load_dispatch_manifest(path: str | Path, schema_path: Path | None = None) -> DispatchManifest:
     schema_path = Path(schema_path) if schema_path is not None else _REFERENCES / "dispatch-manifest-schema.json"
     return DispatchManifest.from_dict(_read_validated(path, schema_path, merge_defaults=True))
+
+
+def load_and_merge_additional_tasks(
+    existing: DispatchManifest, tasks_path: Path, cluster: ClusterConfig,
+) -> tuple[DispatchManifest, list[TaskSpec]]:
+    payload = _read_json(tasks_path)
+    if isinstance(payload, list):
+        payload = {"tasks": payload}
+    elif not isinstance(payload, dict) or payload.keys() - {"tasks", "defaults", "version"}:
+        raise ConfigError("Additional tasks must be an array or a task manifest fragment")
+    schema_path = _REFERENCES / "dispatch-manifest-schema.json"
+    schema, error = preflight_schema(schema_path)
+    if error:
+        raise ConfigError(error)
+    synthetic = {"version": "1", **payload}
+    if not matches_schema(synthetic, schema) or not synthetic["tasks"]:
+        raise ConfigError(f"{tasks_path} does not match JSON Schema {schema_path.name}")
+    defaults = _merged_task(existing.defaults, synthetic.get("defaults", {}))
+    effective = [_merged_task(defaults, task) for task in synthetic["tasks"]]
+    if not matches_schema({"version": "1", "tasks": effective}, schema):
+        raise ConfigError(f"Merged tasks do not match JSON Schema {schema_path.name}")
+    new_tasks = [TaskSpec.from_dict(task) for task in effective]
+    combined = replace(existing, tasks=(*existing.tasks, *new_tasks))
+    validate_manifest_against_cluster(combined, cluster)
+    return combined, list(combined.tasks[len(existing.tasks):])
 
 
 def host_matches_task_static(host: HostConfig, task: TaskSpec) -> tuple[bool, str | None]:
@@ -606,7 +653,7 @@ def validate_manifest_against_cluster(manifest: DispatchManifest, cluster: Clust
 
 def render_task_command(
     task: TaskSpec, host: HostConfig, *, run_id: str, out_dir: str, attempt_dir: str,
-    gpu_ids: list[int], dep_out_dirs: dict[str, str],
+    gpu_ids: list[int], dep_out_dirs: dict[str, str], inputs_dir: str | None = None,
 ) -> str:
     """Substitute literal values into a trusted shell template with caller-provided quoting."""
     values = {
@@ -620,6 +667,8 @@ def render_task_command(
         "host_id": host.id,
         "work_root": host.work_root,
     }
+    if inputs_dir is not None:
+        values["inputs_dir"] = inputs_dir
 
     def substitute(match: re.Match[str]) -> str:
         key = match.group(1)

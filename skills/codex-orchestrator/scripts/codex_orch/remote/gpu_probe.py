@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
 GPU_QUERY = [
@@ -84,25 +85,57 @@ def csv_slots(text):
             slots[row[1].strip()] = gpu_slot(index, row[2], row[3], row[4])
     return slots
 
-def nvidia_slots(processes, managed):
+def count_managed_gpu_holders(processes, lease_pgids, gpu_index, proc_root="/proc"):
+    if not lease_pgids or not os.path.isdir(proc_root):
+        return 0
+    holders = 0
+    device = f"/dev/nvidia{gpu_index}"
+    for pid, pgid in processes.items():
+        if pgid not in lease_pgids and pid not in lease_pgids:
+            continue
+        directory = f"{proc_root}/{pid}/fd"
+        try:
+            descriptors = os.listdir(directory)
+        except OSError:
+            continue
+        for fd in descriptors:
+            try:
+                if os.readlink(f"{directory}/{fd}") == device:
+                    holders += 1
+                    break
+            except OSError:
+                continue
+    return holders
+
+def nvidia_slots(processes, managed, leased_gpu_pgids):
     text = capture(["nvidia-smi", *GPU_QUERY])
     if not text:
         return [], "nvidia-smi returned no GPU inventory."
     slots = csv_slots(text)
     compute = capture(["nvidia-smi", *COMPUTE_QUERY])
+    unmapped_by_uuid = defaultdict(list)
     for row in csv.reader((compute or "").splitlines(), skipinitialspace=True):
         if len(row) != 3 or row[0].strip() not in slots:
             continue
-        slot = slots[row[0].strip()]
+        uuid = row[0].strip()
         pid = integer(row[1])
-        pgid = processes.get(pid)
-        if pgid in managed or pid in managed:
-            continue
-        if pid and pid > 0:
-            slot["external_pids"].append(pid)
-        if pgid is None and count(row[2]) > 0:
-            slot["external_busy"] = True
-    for slot in slots.values():
+        if pid in processes:
+            if processes[pid] not in managed and pid not in managed:
+                slots[uuid]["external_pids"].append(pid)
+        else:
+            unmapped_by_uuid[uuid].append((pid, count(row[2])))
+    for uuid, slot in slots.items():
+        unmapped_rows = unmapped_by_uuid[uuid]
+        gpu_index = slot["index"]
+        if gpu_index in leased_gpu_pgids:
+            active_unmapped = [(pid, used) for pid, used in unmapped_rows if pid or used > 0]
+            if active_unmapped:
+                holders = count_managed_gpu_holders(processes, leased_gpu_pgids[gpu_index], gpu_index)
+                unmapped_rows = active_unmapped[holders:]
+                slot["external_busy"] = bool(unmapped_rows)
+        else:
+            slot["external_busy"] = any(used > 0 for _, used in unmapped_rows)
+        slot["external_pids"].extend(pid for pid, _ in unmapped_rows if pid and pid > 0)
         slot["external_pids"] = sorted(set(slot["external_pids"]))
     warning = None if compute is not None else "nvidia-smi compute-app inventory is unavailable."
     return list(slots.values()), warning
@@ -168,8 +201,12 @@ def probe_attempt(attempt, live_pgids):
     except (OSError, ValueError, RecursionError):
         done = None
     log_tail = ""
+    log_size = log_mtime = None
+    log_path = directory / "task.log"
     try:
-        with (directory / "task.log").open("rb") as log:
+        stats = log_path.stat()
+        log_size, log_mtime = stats.st_size, round(stats.st_mtime, 3)
+        with log_path.open("rb") as log:
             size = log.seek(0, os.SEEK_END)
             log.seek(max(0, size - 4096))
             log_tail = log.read(4096).decode("utf-8", errors="replace")
@@ -181,6 +218,8 @@ def probe_attempt(attempt, live_pgids):
         "done_payload": done if isinstance(done, dict) else None,
         "done_markers_present": all(marker_present(out_dir, marker) for marker in attempt["done_markers"]),
         "log_tail": log_tail,
+        "log_size": log_size,
+        "log_mtime": log_mtime,
     }
 
 def disk_free(work_root):
@@ -199,7 +238,13 @@ def main(request):
     live_pgids = set(processes.values())
     gpus, warning = [], None
     if request["accelerator"] == "nvidia":
-        gpus, warning = nvidia_slots(processes, set(request["managed_pgids"]))
+        leased_gpu_pgids = defaultdict(set)
+        for attempt in request["attempts"]:
+            pgid = attempt["pgid"]
+            if type(pgid) is int and pgid > 1 and (pgid in live_pgids or kill0_pgid(pgid)):
+                for gpu_index in attempt.get("gpu_ids", []):
+                    leased_gpu_pgids[gpu_index].add(pgid)
+        gpus, warning = nvidia_slots(processes, set(request["managed_pgids"]), leased_gpu_pgids)
     elif request["accelerator"] == "ppu":
         gpus, warning = ppu_slots(request)
     allowed_indices = request["gpu_ids"]
@@ -213,6 +258,12 @@ def main(request):
             for attempt in request["attempts"]
         },
         "disk_free_gb": disk_free(request["work_root"]),
+        "existing_done_tasks": sorted({
+            entry["task_id"] for entry in request.get("marker_checks") or []
+            if entry["done_markers"] and all(
+                marker_present(Path(entry["out_dir"]), marker) for marker in entry["done_markers"]
+            )
+        }),
     }
     if warning:
         result["probe_warning"] = warning
@@ -224,9 +275,15 @@ if __name__ == "__main__":
 """
 
 
-def build_probe_request(host: HostConfig, active_attempts: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def build_probe_request(
+    host: HostConfig, active_attempts: Sequence[dict[str, Any]], *,
+    marker_checks: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
     attempt_keys = ("task_id", "attempt", "pgid", "attempt_dir", "out_dir", "done_markers")
-    attempts = [{key: attempt[key] for key in attempt_keys} for attempt in active_attempts]
+    attempts = [
+        {**{key: attempt[key] for key in attempt_keys}, "gpu_ids": list(attempt.get("gpu_ids", []))}
+        for attempt in active_attempts
+    ]
     return {
         "accelerator": host.accelerator,
         "gpu_ids": list(host.gpu_ids) if host.gpu_ids is not None else None,
@@ -237,6 +294,7 @@ def build_probe_request(host: HostConfig, active_attempts: Sequence[dict[str, An
             if type(attempt["pgid"]) is int and attempt["pgid"] > 1
         }),
         "attempts": attempts,
+        "marker_checks": list(marker_checks),
     }
 
 
@@ -259,8 +317,13 @@ def parse_probe_response(host: HostConfig, raw_stdout: str) -> HostProbeSnapshot
             return failed
         raw_gpus = payload.get("gpus", [])
         raw_attempts = payload.get("attempts", {})
+        existing_done_tasks = payload.get("existing_done_tasks", [])
         disk_free_gb = payload.get("disk_free_gb")
         if not isinstance(raw_gpus, list) or not isinstance(raw_attempts, dict):
+            return failed
+        if not isinstance(existing_done_tasks, list) or any(
+            not isinstance(task_id, str) for task_id in existing_done_tasks
+        ):
             return failed
         if disk_free_gb is not None and (type(disk_free_gb) not in (int, float) or disk_free_gb < 0):
             return failed
@@ -286,10 +349,15 @@ def parse_probe_response(host: HostConfig, raw_stdout: str) -> HostProbeSnapshot
                 or not isinstance(status.log_tail, str)
                 or (status.done_payload is not None and not isinstance(status.done_payload, dict))
                 or (status.attempt is not None and type(status.attempt) is not int)
+                or (status.log_size is not None and (type(status.log_size) is not int or status.log_size < 0))
+                or (status.log_mtime is not None and (
+                    type(status.log_mtime) not in (int, float) or status.log_mtime < 0
+                ))
             ):
                 return failed
         return HostProbeSnapshot(
             host_id=host.id, ok=True, disk_free_gb=disk_free_gb, gpus=gpus, attempts=attempts,
+            existing_done_tasks=existing_done_tasks,
         )
     except (TypeError, ValueError, RecursionError):
         return failed
@@ -297,9 +365,11 @@ def parse_probe_response(host: HostConfig, raw_stdout: str) -> HostProbeSnapshot
 
 def probe_host(
     transport: SshTransport, host: HostConfig, active_attempts: Sequence[dict[str, Any]], *,
-    timeout_s: float = 25.0,
+    timeout_s: float = 25.0, marker_checks: Sequence[dict[str, Any]] = (),
 ) -> HostProbeSnapshot:
-    request = json.dumps(build_probe_request(host, active_attempts), separators=(",", ":"))
+    request = json.dumps(
+        build_probe_request(host, active_attempts, marker_checks=marker_checks), separators=(",", ":"),
+    )
     encoded = base64.b64encode(request.encode("utf-8")).decode("ascii")
     command = shlex.join(("python3", "-c", REMOTE_PROBE_SCRIPT, encoded))
     result = transport.run_remote(host, command, timeout_s=timeout_s)

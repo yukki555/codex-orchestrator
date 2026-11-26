@@ -16,6 +16,7 @@ from .models import (
     HostConfig,
     HostProbeSnapshot,
     HostRuntime,
+    RelayInput,
     RunState,
     TaskAttempt,
     TaskRuntime,
@@ -69,7 +70,7 @@ class PullAction(_JsonRecord):
     out_dir: str
     mirror_root: str | None
     pull_to_local: bool
-    pull_excludes: tuple[str, ...]
+    pull_excludes: tuple[str, ...] | list[str]
     pull_max_mb: int
 
 
@@ -127,11 +128,13 @@ def _active_on(state: RunState, host_id: str) -> Iterator[tuple[str, TaskRuntime
             yield task_id, runtime, attempt
 
 
-def _non_retryable(task: TaskSpec, exit_code: int | None, log_tail: str) -> bool:
+def _non_retryable_reason(task: TaskSpec, exit_code: int | None, log_tail: str) -> str | None:
     policy = task.retry_policy
-    return exit_code in policy.non_retryable_exit_codes or any(
-        re.search(pattern, log_tail) for pattern in policy.non_retryable_log_patterns
-    )
+    if exit_code in policy.non_retryable_exit_codes:
+        return "non_retryable_exit_code"
+    if any(re.search(pattern, log_tail) for pattern in policy.non_retryable_log_patterns):
+        return "non_retryable_log_pattern"
+    return None
 
 
 def _finish_failure(
@@ -188,9 +191,9 @@ def _reconcile_attempt(
     if payload is not None:
         attempt.exit_code = payload.get("exit_code")
     timed_out = attempt.state == "cancelling"
-    if timed_out and status.pgid_alive:
+    if timed_out and status.pgid_alive and payload is None:
         return
-    if not timed_out and payload is not None and attempt.exit_code == 0 and (
+    if not timed_out and attempt.cancel_reason is None and payload is not None and attempt.exit_code == 0 and (
         not task.done_markers or status.done_markers_present or payload.get("skipped_existing")
     ):
         attempt.state = runtime.state = "completed"
@@ -209,7 +212,9 @@ def _reconcile_attempt(
                 host_rt.recent_affinity_keys.append(key)
         return
 
-    if timed_out:
+    if attempt.cancel_reason == "stall_timeout" and (payload is not None or not status.pgid_alive):
+        kind, reason = "task_error", "stall_timeout"
+    elif timed_out or (attempt.cancel_reason == "timeout" and (payload is not None or not status.pgid_alive)):
         kind, reason = "task_error", "timeout"
     elif payload is not None:
         if attempt.exit_code == 0:
@@ -221,16 +226,48 @@ def _reconcile_attempt(
     elif not status.pgid_alive:
         kind, reason = "infra_error", "process_vanished"
     else:
+        if attempt.last_activity_at is None:
+            attempt.last_activity_at = attempt.started_at
+        log_changed = (
+            (status.log_size is not None and attempt.last_log_size is not None
+             and status.log_size != attempt.last_log_size)
+            or (status.log_mtime is not None and attempt.last_log_mtime is not None
+                and status.log_mtime != attempt.last_log_mtime)
+            or (attempt.last_log_size is None and status.log_size is not None and status.log_size > 0)
+        )
+        if status.log_size is not None:
+            attempt.last_log_size = status.log_size
+        if status.log_mtime is not None:
+            attempt.last_log_mtime = status.log_mtime
+        if log_changed or any(
+            gpu.utilization_pct > 0 for gpu in host_rt.gpus if gpu.index in attempt.gpu_ids
+        ):
+            attempt.last_activity_at = now
+        idle_s = now - attempt.last_activity_at
         if task.timeout_s is not None and now - attempt.started_at > task.timeout_s:
+            attempt.cancel_reason = "timeout"
             attempt.state = "cancelling"
             preempts.append(_preempt(task.id, attempt, "timeout"))
             events.append(SchedulerEvent(now, "task_timeout", task.id, host.id, {"attempt": attempt.attempt}))
+        elif task.stall_timeout_s is not None and idle_s > task.stall_timeout_s:
+            attempt.cancel_reason = "stall_timeout"
+            attempt.state = "cancelling"
+            preempts.append(_preempt(task.id, attempt, "stall_timeout"))
+            events.append(SchedulerEvent(now, "task_stall_timeout", task.id, host.id, {
+                "attempt": attempt.attempt, "stall_timeout_s": task.stall_timeout_s, "idle_s": round(idle_s, 2),
+            }))
         return
 
-    events.append(_finish_failure(
-        task, runtime, attempt, kind=kind, reason=reason, now=now,
-        retryable=not _non_retryable(task, attempt.exit_code, status.log_tail),
-    ))
+    nr_reason = None
+    if reason not in ("timeout", "stall_timeout", "missing_done_markers"):
+        nr_reason = _non_retryable_reason(task, attempt.exit_code, status.log_tail)
+    event = _finish_failure(
+        task, runtime, attempt, kind=kind, reason=nr_reason or reason, now=now,
+        retryable=nr_reason is None,
+    )
+    if nr_reason is not None:
+        event.details["non_retryable"] = True
+    events.append(event)
 
 
 def _unreachable(
@@ -271,7 +308,9 @@ def _reconcile_external(
 ) -> None:
     occupied = {
         gpu.index for gpu in host_rt.gpus
-        if gpu.external_pids or (gpu.index not in managed_gpus and _external_pressure(gpu, host))
+        if gpu.external_pids or gpu.external_busy or (
+            gpu.index not in managed_gpus and _external_pressure(gpu, host)
+        )
     }
     host_rt.external_gpu_ticks = {
         str(gpu.index): host_rt.external_gpu_ticks.get(str(gpu.index), 0) + 1 if gpu.index in occupied else 0
@@ -291,10 +330,11 @@ def _reconcile_external(
         if occupied and host_rt.external_host_ticks >= host.external_grace_ticks and not host_rt.cordoned:
             host_rt.cordoned = True
             host_rt.cordon_reason = "external_yield"
+            host_rt.state = "cordoned"
             events.append(SchedulerEvent(now, "host_yielded", host_id=host.id))
             yield_preempt = host.yield_preempt_running
 
-    collision_gpus = {gpu.index for gpu in host_rt.gpus if gpu.external_pids}
+    collision_gpus = {gpu.index for gpu in host_rt.gpus if gpu.external_pids or gpu.external_busy}
     for task_id, runtime, attempt in _active_on(state, host.id):
         collisions = sorted(collision_gpus.intersection(attempt.gpu_ids))
         if policy == "skip_gpu" and collisions:
@@ -347,6 +387,25 @@ def reconcile_host_probe(
         )
     managed_gpus = {gpu for _, _, attempt in _active_on(state, host.id) for gpu in attempt.gpu_ids}
     _reconcile_external(state, host, host_rt, tasks_by_id, managed_gpus, now, preempts, events)
+    for task_id in dict.fromkeys(snapshot.existing_done_tasks):
+        task = tasks_by_id.get(task_id)
+        runtime = state.tasks.get(task_id)
+        if task is None or not task.done_markers or runtime is None or runtime.state != "ready":
+            continue
+        if any(attempt.state in ("running", "cancelling") for attempt in runtime.attempts):
+            continue
+        out_dir = f"{host.work_root.rstrip('/')}/{state.run_id}/outputs/{task_id}"
+        runtime.state = "completed"
+        runtime.completed_host = host.id
+        runtime.completed_out_dir = out_dir
+        events.append(SchedulerEvent(now, "task_completed", task_id, host.id, {
+            "attempt": 0, "skipped_existing": True, "prechecked": True,
+        }))
+        if task.pull_to_local or host.mirror_root:
+            pulls.append(PullAction(
+                task_id, 0, host.id, out_dir, host.mirror_root,
+                task.pull_to_local, list(task.pull_excludes), task.pull_max_mb,
+            ))
     events.extend(advance_dag_states(state, tasks_by_id, now))
     return preempts, pulls, events
 
@@ -354,9 +413,16 @@ def reconcile_host_probe(
 def compute_free_gpus(
     host_cfg: HostConfig, host_rt: HostRuntime, leased_gpus: set[int], now: float,
 ) -> list[int]:
+    return _usable_gpus(host_cfg, host_rt, leased_gpus, now)
+
+
+def _usable_gpus(
+    host_cfg: HostConfig, host_rt: HostRuntime, leased_gpus: set[int], now: float, *,
+    include_leased: bool = False,
+) -> list[int]:
     if host_cfg.accelerator == "cpu":
         return []
-    excluded = leased_gpus.union(host_rt.cordoned_gpus)
+    excluded = set(host_rt.cordoned_gpus)
     allowed = None if host_cfg.gpu_ids is None else set(host_cfg.gpu_ids)
     free = set()
     for gpu in host_rt.gpus:
@@ -364,10 +430,14 @@ def compute_free_gpus(
             continue
         if host_rt.gpu_cooldown_until.get(str(gpu.index), now) > now:
             continue
-        if host_cfg.external_gpu_policy != "ignore" and (
-            gpu.external_pids or _external_pressure(gpu, host_cfg)
-            or gpu.memory_total_mb - gpu.memory_used_mb < host_cfg.min_free_mem_mb
-        ):
+        leased = gpu.index in leased_gpus
+        if leased and not include_leased:
+            continue
+        if include_leased or host_cfg.external_gpu_policy != "ignore":
+            if gpu.external_pids or gpu.external_busy or (not leased and _external_pressure(gpu, host_cfg)):
+                continue
+        if (not leased and gpu.memory_total_mb > 0
+                and gpu.memory_total_mb - gpu.memory_used_mb < host_cfg.min_free_mem_mb):
             continue
         free.add(gpu.index)
     return sorted(free)
@@ -407,14 +477,68 @@ def _new_assignment(task: TaskSpec, runtime: TaskRuntime, host: HostConfig, gpu_
     )
 
 
+def _host_ready(host_rt: HostRuntime) -> bool:
+    return host_rt.state == "ready" and host_rt.preflight_ok and not (host_rt.cordoned or host_rt.disk_full)
+
+
+def _release_drain(host_rt: HostRuntime, host_id: str, now: float) -> SchedulerEvent:
+    task_id = host_rt.draining_for
+    host_rt.draining_for = None
+    host_rt.draining_since = None
+    return SchedulerEvent(now, "host_drain_released", task_id, host_id, {"task_id": task_id})
+
+
+def _release_task_drains(state: RunState, task_id: str, now: float) -> list[SchedulerEvent]:
+    return [
+        _release_drain(host_rt, host_id, now) for host_id, host_rt in sorted(state.hosts.items())
+        if host_rt.draining_for == task_id
+    ]
+
+
 def plan_dispatches(
-    state: RunState, cluster: ClusterConfig, tasks_by_id: dict[str, TaskSpec],
-    run_id: str, now: float,
+    state: RunState, cluster: ClusterConfig, tasks_by_id: dict[str, TaskSpec] | DispatchManifest,
+    run_id: str | float | None = None, now: float | None = None,
 ) -> tuple[list[DispatchAssignment], list[SchedulerEvent]]:
-    """Propose assignments for one tick. The caller records each launch outcome."""
+    """Propose assignments from a manifest or a task map and explicit run ID."""
+    if isinstance(tasks_by_id, DispatchManifest):
+        if now is None and isinstance(run_id, (int, float)):
+            now = run_id
+        run_id = state.run_id
+        tasks_by_id = {task.id: task for task in tasks_by_id.tasks}
     if not isinstance(run_id, str) or not VALID_ID_RE.fullmatch(run_id):
         raise ValidationError(f"Invalid run ID: {run_id!r}")
-    events = advance_dag_states(state, tasks_by_id, now)
+    if now is None:
+        raise TypeError("plan_dispatches requires a scheduling timestamp")
+    events = []
+    leases: dict[str, set[int]] = {host_id: set() for host_id in cluster.hosts}
+    cpu_tasks: Counter[str] = Counter()
+    drain_by_host: dict[str, float] = {host_id: 0.0 for host_id in cluster.hosts}
+    for task_id, runtime in state.tasks.items():
+        attempt = runtime.active_attempt
+        if attempt is not None:
+            if attempt.state == "running":
+                remaining = tasks_by_id[task_id].est_duration_s - (now - attempt.started_at)
+                drain_by_host[attempt.host_id] = max(drain_by_host[attempt.host_id], remaining)
+            if attempt.gpu_ids:
+                leases[attempt.host_id].update(attempt.gpu_ids)
+            else:
+                cpu_tasks[attempt.host_id] += 1
+
+    for host_id, host_rt in sorted(state.hosts.items()):
+        if host_rt.draining_for is None:
+            continue
+        task = tasks_by_id.get(host_rt.draining_for)
+        runtime = state.tasks.get(host_rt.draining_for)
+        host = cluster.hosts.get(host_id)
+        if (
+            task is None or runtime is None or runtime.state != "ready" or runtime.next_eligible_at > now
+            or host is None or not _host_ready(host_rt) or not host_matches_task_static(host, task)[0]
+            or (task.host_affinity == "require_dep_host" and host_id != _primary_dep_host(state, task))
+            or len(_usable_gpus(host, host_rt, leases[host_id], now, include_leased=True)) < task.gpus
+        ):
+            events.append(_release_drain(host_rt, host_id, now))
+
+    events.extend(advance_dag_states(state, tasks_by_id, now))
     downstream = _downstream_counts(tasks_by_id)
     ready = sorted(
         (tasks_by_id[task_id] for task_id, rt in state.tasks.items()
@@ -424,47 +548,52 @@ def plan_dispatches(
             task.manifest_index, task.id,
         ),
     )
-    leases: dict[str, set[int]] = {host_id: set() for host_id in cluster.hosts}
-    cpu_tasks: Counter[str] = Counter()
-    for runtime in state.tasks.values():
-        attempt = runtime.active_attempt
-        if attempt is not None:
-            if attempt.gpu_ids:
-                leases[attempt.host_id].update(attempt.gpu_ids)
-            else:
-                cpu_tasks[attempt.host_id] += 1
-
     assignments = []
     for task in ready:
         runtime = state.tasks[task.id]
         dep_host = _primary_dep_host(state, task)
         affinity_key = task.host_affinity.partition(":")[2]
         candidates = []
+        drain_candidates = []
         for host_id, host in cluster.hosts.items():
             host_rt = state.hosts[host_id]
             if (
-                host_rt.state != "ready" or host_rt.cordoned or not host_rt.preflight_ok
+                not _host_ready(host_rt)
                 or host_rt.draining_for not in (None, task.id)
                 or not host_matches_task_static(host, task)[0]
                 or (task.host_affinity == "require_dep_host" and host_id != dep_host)
             ):
                 continue
+            affinity_bonus = 0.0
+            if task.host_affinity == "prefer_dep_host" and host_id == dep_host:
+                affinity_bonus += 100.0
+            if affinity_key and affinity_key in host_rt.recent_affinity_keys:
+                affinity_bonus += 50.0
             free_gpus = []
             if task.gpus:
                 free_gpus = compute_free_gpus(host, host_rt, leases[host_id], now)
                 if len(free_gpus) < task.gpus:
+                    if (
+                        task.gpus > 1 and host_rt.draining_for is None
+                        and len(_usable_gpus(host, host_rt, leases[host_id], now, include_leased=True)) >= task.gpus
+                    ):
+                        drain_candidates.append((drain_by_host[host_id], -affinity_bonus, -host.speed_weight, host_id))
                     continue
             elif cpu_tasks[host_id] >= host.max_concurrent_cpu_tasks:
                 continue
 
             cooling = runtime.failed_infra_hosts.get(host_id, now) > now
-            score = 10.0 * host.speed_weight - (500.0 if cooling else 0.0)
-            if task.host_affinity == "prefer_dep_host" and host_id == dep_host:
-                score += 100.0
-            if affinity_key and affinity_key in host_rt.recent_affinity_keys:
-                score += 50.0
+            score = 10.0 * host.speed_weight - (500.0 if cooling else 0.0) + affinity_bonus
             candidates.append((cooling, -score, host_id, free_gpus))
         if not candidates:
+            if drain_candidates and not any(host.draining_for == task.id for host in state.hosts.values()):
+                estimate, _, _, host_id = min(drain_candidates)
+                host_rt = state.hosts[host_id]
+                host_rt.draining_for = task.id
+                host_rt.draining_since = now
+                events.append(SchedulerEvent(now, "host_draining", task.id, host_id, {
+                    "task_id": task.id, "gpus_needed": task.gpus, "est_drain_s": round(estimate, 2),
+                }))
             continue
         _, _, host_id, free_gpus = min(candidates)
         gpu_ids = free_gpus[:task.gpus]
@@ -473,16 +602,25 @@ def plan_dispatches(
         else:
             cpu_tasks[host_id] += 1
         assignments.append(_new_assignment(task, runtime, cluster.hosts[host_id], gpu_ids, run_id))
+        if task.gpus > 1:
+            events.extend(_release_task_drains(state, task.id, now))
     return assignments, events
 
 
-def _record_attempt(state: RunState, assignment: DispatchAssignment, now: float) -> TaskAttempt:
+def _validate_assignment(
+    state: RunState, assignment: DispatchAssignment, now: float, allowed_states: tuple[str, ...],
+) -> TaskRuntime:
     runtime = state.tasks[assignment.task_id]
     if (
-        runtime.state != "ready" or runtime.next_eligible_at > now
+        runtime.state not in allowed_states or runtime.next_eligible_at > now
         or assignment.attempt != len(runtime.attempts) + 1
     ):
         raise ValidationError(f"Stale dispatch assignment for task {assignment.task_id!r}")
+    return runtime
+
+
+def _record_attempt(state: RunState, assignment: DispatchAssignment, now: float) -> TaskAttempt:
+    runtime = _validate_assignment(state, assignment, now, ("ready", "relaying"))
     attempt = TaskAttempt(
         assignment.attempt, assignment.host_id, list(assignment.gpu_ids),
         assignment.out_dir, assignment.attempt_dir, now,
@@ -497,6 +635,7 @@ def mark_dispatch_started(
     attempt = _record_attempt(state, assignment, now)
     attempt.pgid = pgid
     state.tasks[assignment.task_id].state = "running"
+    _release_task_drains(state, assignment.task_id, now)
     return SchedulerEvent(
         now, "task_started", assignment.task_id, assignment.host_id,
         {"attempt": assignment.attempt, "gpu_ids": list(assignment.gpu_ids), "pgid": pgid},
@@ -512,17 +651,54 @@ def mark_dispatch_launch_failed(
     attempt = _record_attempt(state, assignment, now)
     return _finish_failure(
         task, state.tasks[task.id], attempt, kind="infra_error", reason=reason, now=now,
-        retryable=not _non_retryable(task, None, reason),
+        retryable=_non_retryable_reason(task, None, reason) is None,
     )
 
 
+def needs_cross_host_relay(state: RunState, task: TaskSpec, target_host_id: str) -> list[RelayInput]:
+    return [
+        relay for relay in task.relay_inputs
+        if state.tasks[relay.from_task].state == "completed"
+        and state.tasks[relay.from_task].completed_host not in (None, target_host_id)
+    ]
+
+
+def mark_task_relaying(state: RunState, assignment: DispatchAssignment, now: float) -> list[SchedulerEvent]:
+    runtime = _validate_assignment(state, assignment, now, ("ready",))
+    runtime.state = "relaying"
+    return [SchedulerEvent(now, "relay_started", assignment.task_id, assignment.host_id, {
+        "attempt": assignment.attempt,
+    })]
+
+
+def mark_relay_failed(
+    state: RunState, manifest: DispatchManifest, assignment: DispatchAssignment, reason: str,
+    now: float, *, retryable: bool,
+) -> list[SchedulerEvent]:
+    tasks_by_id = {task.id: task for task in manifest.tasks}
+    task = tasks_by_id[assignment.task_id]
+    runtime = _validate_assignment(state, assignment, now, ("relaying",))
+    attempt = _record_attempt(state, assignment, now)
+    failure = _finish_failure(
+        task, runtime, attempt, kind="infra_error", reason=reason, now=now, retryable=retryable,
+    )
+    return [failure, *advance_dag_states(state, tasks_by_id, now)]
+
+
+def has_active_tasks(state: RunState) -> bool:
+    return any(runtime.state in ("running", "relaying") for runtime in state.tasks.values())
+
+
+def task_counts(state: RunState) -> dict[str, int]:
+    return dict(sorted(Counter(runtime.state for runtime in state.tasks.values()).items()))
+
+
 def build_summary(state: RunState) -> dict[str, Any]:
-    counts = Counter(runtime.state for runtime in state.tasks.values())
     return {
         "run_id": state.run_id,
         "created_at": state.created_at,
         "terminal": is_run_terminal(state),
-        "task_counts": dict(sorted(counts.items())),
+        "task_counts": task_counts(state),
         "tasks": {task_id: runtime.to_dict() for task_id, runtime in sorted(state.tasks.items())},
         "hosts": {host_id: runtime.to_dict() for host_id, runtime in sorted(state.hosts.items())},
     }
@@ -530,3 +706,6 @@ def build_summary(state: RunState) -> dict[str, Any]:
 
 def is_run_terminal(state: RunState) -> bool:
     return all(runtime.state in TERMINAL_TASK_STATES for runtime in state.tasks.values())
+
+
+is_terminal = is_run_terminal
