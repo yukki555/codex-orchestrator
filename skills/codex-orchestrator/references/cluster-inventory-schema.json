@@ -1,0 +1,144 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Remote cluster inventory",
+  "type": "object",
+  "required": [
+    "version",
+    "hosts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    },
+    "hosts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "ssh_target",
+          "work_root"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ssh_target": {
+            "type": "string",
+            "description": "An SSH destination in host or user@host form."
+          },
+          "ssh_port": {
+            "type": "integer"
+          },
+          "ssh_options": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "An allowlisted OpenSSH option."
+            }
+          },
+          "max_ssh_concurrency": {
+            "type": "integer"
+          },
+          "accelerator": {
+            "type": "string",
+            "enum": [
+              "nvidia",
+              "ppu",
+              "cpu"
+            ]
+          },
+          "gpu_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer"
+            }
+          },
+          "external_gpu_policy": {
+            "type": "string",
+            "enum": [
+              "skip_gpu",
+              "preempt_gpu",
+              "yield_host",
+              "ignore"
+            ]
+          },
+          "external_grace_ticks": {
+            "type": "integer"
+          },
+          "yield_preempt_running": {
+            "type": "boolean"
+          },
+          "min_free_mem_mb": {
+            "type": "integer"
+          },
+          "external_mem_threshold_mb": {
+            "type": "integer"
+          },
+          "max_gpu_util_pct": {
+            "type": "integer"
+          },
+          "min_disk_free_gb": {
+            "type": "number"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "A capability tag."
+            }
+          },
+          "speed_weight": {
+            "type": "number"
+          },
+          "work_root": {
+            "type": "string",
+            "description": "The absolute POSIX directory for remote work."
+          },
+          "mirror_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The absolute POSIX directory for mirrored outputs."
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "description": "An environment variable value."
+            }
+          },
+          "setup_cmd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A shell command to initialize the remote environment."
+          },
+          "vars": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "description": "A host-specific template value."
+            }
+          },
+          "max_concurrent_cpu_tasks": {
+            "type": "integer"
+          },
+          "ppu_probe_cmd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A shell command to probe PPU capacity."
+          }
+        }
+      }
+    }
+  }
+}

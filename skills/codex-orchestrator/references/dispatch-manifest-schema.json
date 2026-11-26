@@ -1,0 +1,364 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Remote dispatch manifest",
+  "type": "object",
+  "required": [
+    "version",
+    "tasks"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "description": "The ID used for the run and its output directory."
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "type": "integer"
+        },
+        "est_duration_s": {
+          "type": "integer"
+        },
+        "gpus": {
+          "type": "integer"
+        },
+        "requires_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A capability tag."
+          }
+        },
+        "allowed_hosts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "description": "An inventory host ID."
+          }
+        },
+        "excluded_hosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "An inventory host ID."
+          }
+        },
+        "allow_partial_deps": {
+          "type": "boolean"
+        },
+        "host_affinity": {
+          "type": "string",
+          "description": "A placement rule of none, prefer_dep_host, require_dep_host, auto, or prefer_key:<key>."
+        },
+        "done_markers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A required path relative to the task output directory."
+          }
+        },
+        "pull_to_local": {
+          "type": "boolean"
+        },
+        "pull_excludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A glob to exclude from output transfers."
+          }
+        },
+        "pull_max_mb": {
+          "type": "integer"
+        },
+        "retry_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_retries": {
+              "type": "integer"
+            },
+            "max_infra_retries": {
+              "type": "integer"
+            },
+            "max_preempt_retries": {
+              "type": "integer"
+            },
+            "backoff_s": {
+              "type": "integer"
+            },
+            "retry_on_host_lost": {
+              "type": "boolean"
+            },
+            "non_retryable_exit_codes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "non_retryable_log_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "description": "A Python regular expression for a non-retryable log message."
+              }
+            }
+          }
+        },
+        "timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stall_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "description": "An environment variable value."
+          }
+        }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "required": [
+        "local_dir",
+        "remote_var"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "local_dir": {
+          "type": "string",
+          "description": "The source directory to synchronize."
+        },
+        "remote_var": {
+          "type": "string",
+          "description": "The host variable that identifies the synchronization destination."
+        },
+        "excludes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "A glob to exclude from synchronization."
+          }
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tar_ssh"
+          ]
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "description": "A shell command for host preflight."
+        },
+        "timeout_s": {
+          "type": "integer"
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "cmd"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "A manifest task ID."
+          },
+          "name": {
+            "type": "string",
+            "description": "A human-readable task name."
+          },
+          "cmd": {
+            "type": "string",
+            "description": "A shell command with optional named template placeholders."
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "est_duration_s": {
+            "type": "integer"
+          },
+          "gpus": {
+            "type": "integer"
+          },
+          "requires_tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "A capability tag."
+            }
+          },
+          "allowed_hosts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "description": "An inventory host ID."
+            }
+          },
+          "excluded_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "An inventory host ID."
+            }
+          },
+          "allow_partial_deps": {
+            "type": "boolean"
+          },
+          "host_affinity": {
+            "type": "string",
+            "description": "A placement rule of none, prefer_dep_host, require_dep_host, auto, or prefer_key:<key>."
+          },
+          "done_markers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "A required path relative to the task output directory."
+            }
+          },
+          "pull_to_local": {
+            "type": "boolean"
+          },
+          "pull_excludes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "A glob to exclude from output transfers."
+            }
+          },
+          "pull_max_mb": {
+            "type": "integer"
+          },
+          "retry_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_retries": {
+                "type": "integer"
+              },
+              "max_infra_retries": {
+                "type": "integer"
+              },
+              "max_preempt_retries": {
+                "type": "integer"
+              },
+              "backoff_s": {
+                "type": "integer"
+              },
+              "retry_on_host_lost": {
+                "type": "boolean"
+              },
+              "non_retryable_exit_codes": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "non_retryable_log_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "description": "A Python regular expression for a non-retryable log message."
+                }
+              }
+            }
+          },
+          "timeout_s": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stall_timeout_s": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "description": "An environment variable value."
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "A manifest task ID."
+            }
+          },
+          "relay_inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "from_task",
+                "rel_path"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "from_task": {
+                  "type": "string",
+                  "description": "A manifest task ID."
+                },
+                "rel_path": {
+                  "type": "string",
+                  "description": "The path relative to the dependency output directory."
+                },
+                "max_bytes": {
+                  "type": "integer"
+                },
+                "target_rel_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The destination path relative to the task input directory."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

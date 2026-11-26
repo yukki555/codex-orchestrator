@@ -1,0 +1,49 @@
+{
+  "version": "1",
+  "hosts": {
+    "cluster-a-a100": {
+      "ssh_target": "worker@cluster-a.example.invalid",
+      "work_root": "/srv/orchestrator",
+      "accelerator": "nvidia",
+      "gpu_ids": [
+        0,
+        1
+      ],
+      "speed_weight": 2,
+      "tags": [
+        "cuda",
+        "a100"
+      ],
+      "vars": {
+        "project_dir": "/srv/project"
+      }
+    },
+    "cluster-b-l20z-shared": {
+      "ssh_target": "worker@cluster-b.example.invalid",
+      "work_root": "/srv/orchestrator",
+      "accelerator": "nvidia",
+      "gpu_ids": null,
+      "external_gpu_policy": "yield_host",
+      "external_grace_ticks": 3,
+      "tags": [
+        "cuda",
+        "shared"
+      ],
+      "vars": {
+        "project_dir": "/srv/project"
+      }
+    },
+    "cluster-c-ppu": {
+      "ssh_target": "worker@cluster-c.example.invalid",
+      "work_root": "/srv/orchestrator",
+      "accelerator": "ppu",
+      "tags": [
+        "ppu"
+      ],
+      "ppu_probe_cmd": "ppu-probe --json",
+      "vars": {
+        "project_dir": "/srv/project"
+      }
+    }
+  }
+}
