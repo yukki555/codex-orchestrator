@@ -12,6 +12,7 @@ description: Orchestrate local OpenAI Codex CLI, isolated workers, native resear
 3. **Tier 2 — Subagents and parallel work**.
    - Dispatch built-in `research` with `invoke_subagent(TypeName="research")` for read-only exploration or audit across >= 3 files or any > 20 KB file. Ask for findings and exact evidence anchors.
    - Use `remote-runner` (prefer `Model="flash"`) for cross-host sync, Launch-Verify-Return, and remote probing or polling expected to take >= 2 turns.
+   - Use `/dispatch` (`scripts/remote_dispatch.sh`) for dynamic GPU sweeps with work-stealing across heterogeneous clusters.
    - Use `codex-worker` to isolate noisy local test/build logs or multi-round Codex repair (<= 2 rounds).
    - Use `/dag` (`scripts/run_codex_parallel.sh`) for loosely coupled changes across >= 3 code files or > 200 lines. Use native `/swarm` when workers must coordinate mid-flight, then `/review` on the landed baseline. Read-only composition can use `/run-workflow` with the bundled workflows.
 

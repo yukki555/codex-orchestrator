@@ -6,6 +6,7 @@ Pair **Gemini** (Manager, Corpus Collector, Verifier) with **local Codex CLI** (
 2. **Tier 1 — Direct 1-hop `run_codex.sh` (default)**: Clean single-shot `implement`, `consult`, `review --structured`, `research`, `critique`, or `analyze` via `run_command` (avoids subagent hop overhead and Telephone Game drift).
 3. **Tier 2 — Fan-out or Isolator (only when justified)**:
    * `remote-runner` subagent (prefer `Model="flash"`) for cross-host file sync, remote job Launch-Verify-Return, or remote probing/polling expected to take `>= 2` turns. Keep single read-only probes in the main loop.
+   * `/dispatch` (`remote_dispatch.sh`) for multi-server dynamic GPU sweeps.
    * Built-in research subagent for read-only comprehension/audit across >= 3 files or any > 20 KB file (keep main-loop read_file to bounded <= 200-line slices for editing or spot-checks).
    * `codex-worker` subagent for multi-round Codex repair loops (`<= 2` rounds) or noisy local test/build log isolation.
    * `/dag` (`run_codex_parallel.sh`) for `>= 3` loosely coupled code files (`> 200` lines); `/research` or `/analyze` for `>= 2` orthogonal slices / `>= 3` options; `/debate` for high-stakes architecture trade-offs.

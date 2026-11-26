@@ -35,7 +35,7 @@ READ_GUARD = SCRIPTS / "hook_read_guard.py"
 RULES = ROOT / "rules" / "AGENTS.md"
 AGENT = ROOT / "agents" / "codex-worker.md"
 REMOTE_RUNNER = ROOT / "agents" / "remote-runner.md"
-SKILL_NAMES = ("codex-orchestrator", "impl", "review", "dag", "research", "debate", "analyze", "handoff")
+SKILL_NAMES = ("codex-orchestrator", "impl", "review", "dag", "research", "debate", "analyze", "handoff", "dispatch")
 
 
 class AntigravityPluginTests(unittest.TestCase):
@@ -137,8 +137,25 @@ class AntigravityPluginTests(unittest.TestCase):
                     hook["type"] == "command" and context_guard_path in hook["command"].split()
                     for hook in entries
                 ))
-        for shim in (GUARD, CONTEXT_GUARD, READ_GUARD, HANDOFF_SH, SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh"):
+        for shim in (
+            GUARD, CONTEXT_GUARD, READ_GUARD, HANDOFF_SH,
+            SCRIPTS / "run_codex.sh", SCRIPTS / "run_codex_parallel.sh", SCRIPTS / "remote_dispatch.sh",
+        ):
             self.assertEqual(stat.S_IMODE(shim.stat().st_mode), 0o755, shim)
+
+    def test_dispatch_telemetry_exemption_and_schema_preflight(self):
+        with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
+            from codex_orch import context_telemetry, schema_check
+
+        self.assertFalse(context_telemetry._is_remote_tool_call(
+            "run_command",
+            {"CommandLine": f'"{SCRIPTS / "remote_dispatch.sh"}" status --run-dir /tmp/r1'},
+        ))
+        for filename in ("cluster-inventory-schema.json", "dispatch-manifest-schema.json"):
+            with self.subTest(schema=filename):
+                schema, error = schema_check.preflight_schema(REFERENCES / filename)
+                self.assertIsNone(error)
+                self.assertIsInstance(schema, dict)
 
     def test_all_output_schemas_are_strict(self):
         required_by_schema = {
@@ -218,7 +235,7 @@ class AntigravityPluginTests(unittest.TestCase):
         for tool in ("edit_file", "write_file", "replace", "schedule"):
             self.assertNotIn(tool, remote["tools"])
 
-    def test_eight_skills_valid_and_no_stale_templates(self):
+    def test_nine_skills_valid_and_no_stale_templates(self):
         skill_files = [SKILLS / name / "SKILL.md" for name in SKILL_NAMES]
         for path in skill_files:
             with self.subTest(frontmatter=path.relative_to(ROOT)):
@@ -248,6 +265,8 @@ class AntigravityPluginTests(unittest.TestCase):
                 content = path.read_bytes()
                 self.assertLessEqual(len(content.splitlines()), lines)
                 self.assertLessEqual(len(content), size)
+        dispatch = SKILLS / "dispatch" / "SKILL.md"
+        self.assertLessEqual(len(dispatch.read_bytes().splitlines()), 45, dispatch)
         reference = (REFERENCES / "cli-reference.md").read_text(encoding="utf-8")
         for marker in ("{{args}}", "!{", "~/.gemini/extensions/", "Template A", "Template B"):
             self.assertNotIn(marker, reference)

@@ -74,6 +74,34 @@ The read guard allows handoff packets, media and binary files, child subagent re
 
 For self-hosted changes, invoke the installed runner with `implement --dir "<plugin-repo>" --worktree`, keeping `--spec` and `--out-dir` outside the target checkout. Inspect the isolated candidate and its verification before applying the patch.
 
+## Remote Multi-Server GPU Master Scheduler (remote_dispatch.sh)
+
+For `validate`, `plan`, and a fresh `start`, inventory resolution is `--cluster`, then `CODEX_ORCH_CLUSTER_CONFIG`, then `~/.config/codex-orchestrator/clusters.json`. Keep inventory outside the plugin. `start --resume` uses the saved run configuration.
+
+| Subcommand | Behavior |
+| --- | --- |
+| `validate` | Checks the inventory, manifest, DAG, and placeholder compatibility. |
+| `plan [--live-probe]` | Reports eligibility and execution order. The flag adds live GPU and disk observations. |
+| `start [--sync] [--caffeinate]` | Dispatches Wave 1, prints a receipt, and detaches the controller when work remains. Use `start --resume --run-dir <dir>` to restart the controller. |
+| `run` | Runs the controller loop in the foreground for an existing run. |
+| `tick` | Executes one scheduling cycle for an existing run. Use `--force-probe` to request a fresh probe. |
+| `status [--format table]` | Reads the local summary by default. `--refresh` runs a scheduling tick with a forced probe before reading the summary. |
+| `cordon --host <id> [--gpu <index>] [--preempt]` | Blocks new placements on the selected host or GPU. The preemption flag also interrupts affected scheduler attempts. |
+| `uncordon --host <id> [--gpu <index>]` | Allows new placements on the selected host or GPU. |
+| `requeue --task <id>\|--failed` | Requeues a selected task or failed tasks. |
+| `cancel --task <id>\|--all` | Cancels a selected task or all tasks. |
+| `pull [--task <id>] [--dest <dir>]` | Pulls lightweight results, defaulting to `<run_dir>/results/<task_id>/`. |
+| `stop [--kill-remote]` | Stops the controller. The flag also stops active remote attempts. |
+
+Use `--manifest` for `validate`, `plan`, and fresh `start`. Pass `--run-dir` to `start` and every command that operates on an existing run. Exit codes are `0` for successful CLI completion, `1` for an operational error, `2` for invalid arguments or configuration, `6` for startup without a healthy host or task progress, and `128+sig` when the controller loop is interrupted by a handled signal. Check the receipt or status for individual task outcomes.
+
+```sh
+SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts
+"$SCRIPTS/remote_dispatch.sh" start --cluster "$HOME/.config/codex-orchestrator/clusters.json" \
+  --manifest ./jobs.json --run-dir ./runs/sweep-01
+"$SCRIPTS/remote_dispatch.sh" status --run-dir ./runs/sweep-01 --format table
+```
+
 ## Invocation Examples
 
 ```bash

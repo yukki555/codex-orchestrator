@@ -1,5 +1,16 @@
 # Codex Orchestrator — Backlog & TODO
 
+## Remote Multi-Server Master Scheduler (Milestone 1 Completed, Milestone 2 Planned)
+
+- [x] Ship the external inventory and host-agnostic DAG manifest, SSH preflight, and dynamic GPU scheduling with co-tenancy controls.
+- [x] Ship detached Launch-Verify-Return, reconnect and adoption, local status and live controls, and lightweight result pull-back through `/dispatch`.
+- [ ] Add multi-GPU gang reservation and drain.
+- [ ] Add live queue injection through `add-tasks`.
+- [ ] Add the `stall_timeout_s` watchdog.
+- [ ] Add resumable SHA256 cross-host relay through `relay_inputs`.
+- [ ] Record active runs in the `/handoff` Section 9 snapshot.
+- [ ] Run a real multi-cluster smoke test.
+
 ## Context Hygiene (`v3.9.0`)
 
 - [x] Slim the cold-start policy and skills, move advanced CLI guidance to `cli-reference.md`, add two-tier `read_noise` and `codex-read-guard`, and exclude errored reads from telemetry.
