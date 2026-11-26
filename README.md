@@ -1,8 +1,15 @@
-# Codex Orchestrator (`v3.8.0`)
+# Codex Orchestrator (`v3.9.0`)
 
 A **Dual-Brain** orchestration plugin for **Google Antigravity** pairing **Gemini** (Principal Manager, Corpus Collector & Verifier) with **local OpenAI Codex CLI** (High-Execution Staff Implementer, Independent Reviewer & Red-Team Analyst) across software engineering (`/impl`, `/review`, `/dag`), long-horizon session continuity (`/handoff`), and deep research / red-team debate / experiment analysis (`/research`, `/debate`, `/analyze`).
 
-## What's New in v3.8.0
+## What's New in v3.9.0
+
+* The slim cold start loads a short always-on policy and concise orchestrator and handoff skills. Advanced flags, profiles, contracts, and examples live in [`cli-reference.md`](./skills/codex-orchestrator/references/cli-reference.md).
+* Two-tier `read_noise` first suggests built-in `research` and bounded reads. If reads continue or accumulate again after a research dispatch, it urges another delegation or targeted extraction.
+* The `codex-read-guard` `PreToolUse` hook blocks oversized main-loop `read_file` requests and directs the caller to a tighter range, targeted extraction, or `research`.
+* Denied and otherwise errored `read_file` calls are excluded from read telemetry, including the prior-turn signal used for token spike nudges.
+
+## Historical release v3.8.0
 
 * `consult` now defaults to `gpt-6.2-sol`. Set `--verbosity low|medium|high|inherit` to override the mode default, or use `--no-clarity-footer` to omit the Output Clarity Contract from exec prompts.
 * `review --structured` uses `review-output-schema.json` for severity-ranked findings and explicit unverified areas. All five schemas guide workers to use exact evidence references and self-contained prose.
@@ -43,14 +50,14 @@ agy plugin validate --strict ~/.gemini/config/plugins/codex-orchestrator
 
 | Path | Role |
 | :--- | :--- |
-| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.8.0`) and icon |
-| `SPEC.md` | Behavioral specification (`v3.8`) for exit codes, patch custody, Proof-of-Work, TDD, denoising, and Session Handoff |
-| `hooks.json` | Root `PreToolUse` (`codex-delegate-guard`) and `PreInvocation` + `Stop` (`codex-context-handoff`) lifecycle hook registrations |
+| `plugin.json`, `assets/logo.svg` | Antigravity plugin manifest (`v3.9.0`) and icon |
+| `SPEC.md` | Behavioral specification (`v3.9`) for exit codes, patch custody, Proof-of-Work, TDD, denoising, and Session Handoff |
+| `hooks.json` | Root `PreToolUse` (`codex-delegate-guard`, `codex-read-guard`) and `PreInvocation` + `Stop` (`codex-context-handoff`) lifecycle hook registrations |
 | `rules/AGENTS.md` | Lean (`<= 30` lines) always-on Fold-First ladder, guardrails, handoff policy, and Communication Charter v3.2 pointer |
 | `agents/codex-worker.md` | Context-compression subagent for multi-round Codex repair, local build/test logs, and read-only `/run-workflow` slices |
 | `agents/remote-runner.md` | Remote SSH, file sync, cluster operations, and job Launch-Verify-Return |
 | `skills/codex-orchestrator/config/profiles.json` | Declarative model, effort, speed, command-budget, schema, and `context_handoff` threshold routing table |
-| `skills/codex-orchestrator/scripts/` | Thin shims (`run_codex.sh`, `run_codex_parallel.sh`, `handoff.sh`, `hook_delegate_guard.py`, `hook_context_guard.py`) + zero-dependency `codex_orch/` Python package |
+| `skills/codex-orchestrator/scripts/` | Thin shims (`run_codex.sh`, `run_codex_parallel.sh`, `handoff.sh`, `hook_delegate_guard.py`, `hook_read_guard.py`, `hook_context_guard.py`) + zero-dependency `codex_orch/` Python package |
 | `skills/codex-orchestrator/workflows/` | Reusable Antigravity `/run-workflow` read-only templates (`research_parallel.py`, `debate_multi_critic.py`) |
 | `skills/codex-orchestrator/references/` | 5 strict JSON schemas, Spec & Handoff Packet templates, and Communication Charter (`user-brief-template.md`) |
-| `tests/` | Zero-dependency conformance suites (`test_plugin.py`, `test_handoff.py`) covering `v3.8` and earlier contracts |
+| `tests/` | Zero-dependency conformance suites (`test_plugin.py`, `test_handoff.py`) covering `v3.9` and earlier contracts |

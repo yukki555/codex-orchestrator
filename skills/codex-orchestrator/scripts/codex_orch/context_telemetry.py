@@ -311,6 +311,50 @@ def read_transcript_telemetry(
     invoked_subagents: dict[str, None] = {}
     is_subagent = False
     seen_first_line = False
+    pending_calls: list[object] = []
+    pending_has_read = False
+    errored_indices: set[int] = set()
+    next_pos = 0
+
+    def commit_pending_calls() -> None:
+        nonlocal remote_cmd_count, remote_turn_streak, read_file_count, reads_since_last_research
+        nonlocal read_file_duplicate_count, read_file_unbounded_count, read_file_est_bytes
+        nonlocal plugin_doc_read_count, prev_turn_had_read_file
+        turn_has_tools = turn_has_remote = False
+        for pos, call in enumerate(pending_calls):
+            if not isinstance(call, dict):
+                continue
+            turn_has_tools = True
+            call_name = call.get("name")
+            args = call.get("args", call.get("arguments", {}))
+            if not isinstance(args, dict):
+                args = {}
+            if _is_remote_tool_call(call_name, args):
+                remote_cmd_count += 1
+                turn_has_remote = True
+            elif call_name == "read_file" and pos not in errored_indices:
+                read_path = _read_path(args)
+                if _is_plugin_doc_path(read_path):
+                    plugin_doc_read_count += 1
+                elif not _is_excluded_read_path(read_path):
+                    read_file_count += 1
+                    reads_since_last_research += 1
+                    prev_turn_had_read_file = True
+                    if read_path:
+                        read_file_duplicate_count += read_path in seen_read_paths
+                        seen_read_paths.add(read_path)
+                    unbounded, estimated_bytes = _read_size_estimate(read_path, args)
+                    read_file_unbounded_count += unbounded
+                    read_file_est_bytes += estimated_bytes
+            elif call_name == "invoke_subagent":
+                type_name = args.get("TypeName", args.get("type_name", args.get("typeName", "")))
+                subagent = _unquote_tool_arg(type_name).strip().lower()
+                if subagent:
+                    invoked_subagents[subagent] = None
+                if subagent == "research":
+                    reads_since_last_research = 0
+        if turn_has_tools:
+            remote_turn_streak = remote_turn_streak + 1 if turn_has_remote else 0
 
     try:
         if path:
@@ -320,8 +364,10 @@ def read_transcript_telemetry(
                 tail_start = max(0, end - tail_bytes)
                 stream.seek(0)
                 offset = 0
-                # Outside the tail, decode the first non-blank line and possible
-                # planner and checkpoint rows.
+                planner_markers = (b"CHECKPOINT", b"PLANNER_RESPONSE", b"\\u")
+                # A missing result index can make even a successful result relevant
+                # to the position of a subsequent error.
+                result_markers = planner_markers + (b"GENERIC", b"ERROR")
                 while offset < end:
                     line = stream.readline(end - offset)
                     if not line:
@@ -332,10 +378,11 @@ def read_transcript_telemetry(
                         continue
                     is_first_line = not seen_first_line
                     seen_first_line = True
-                    if not in_tail and not is_first_line and not any(
-                        marker in line for marker in (b"CHECKPOINT", b"PLANNER_RESPONSE", b"\\u")
-                    ):
-                        continue
+                    if not in_tail and not is_first_line:
+                        markers = result_markers if pending_has_read else planner_markers
+                        if (not (pending_has_read and planner_index is None)
+                                and not any(marker in line for marker in markers)):
+                            continue
                     row = _parse_transcript_row(line)
                     if row is None:
                         malformed += in_tail
@@ -343,6 +390,13 @@ def read_transcript_telemetry(
                     if is_first_line:
                         is_subagent = _is_subagent_bootstrap_row(row)
                     kind = row.get("type", row.get("step_type", row.get("stepType", row.get("event"))))
+                    if kind in ("CHECKPOINT", "PLANNER_RESPONSE"):
+                        if kind == "PLANNER_RESPONSE":
+                            commit_pending_calls()
+                        pending_calls = []
+                        pending_has_read = False
+                        errored_indices.clear()
+                        next_pos = 0
                     if kind == "CHECKPOINT":
                         checkpoints += 1
                         planner = planner_index = None
@@ -375,41 +429,26 @@ def read_transcript_telemetry(
                         tool_calls = row.get("tool_calls", row.get("toolCalls"))
                         if not isinstance(tool_calls, list):
                             continue
-                        turn_has_tools = turn_has_remote = False
-                        for call in tool_calls:
-                            if not isinstance(call, dict):
+                        pending_calls = tool_calls
+                        pending_has_read = any(
+                            isinstance(call, dict) and call.get("name") == "read_file"
+                            for call in pending_calls
+                        )
+                    elif (pending_has_read and kind == "GENERIC"
+                          and row.get("source") not in ("SYSTEM", "SYSTEM_SDK", "USER_EXPLICIT")):
+                        if planner_index is not None and type(index) is int:
+                            pos = index - (planner_index + 1)
+                            if not 0 <= pos < len(pending_calls):
                                 continue
-                            turn_has_tools = True
-                            call_name = call.get("name")
-                            args = call.get("args", call.get("arguments", {}))
-                            if not isinstance(args, dict):
-                                args = {}
-                            if _is_remote_tool_call(call_name, args):
-                                remote_cmd_count += 1
-                                turn_has_remote = True
-                            elif call_name == "read_file":
-                                read_path = _read_path(args)
-                                if _is_plugin_doc_path(read_path):
-                                    plugin_doc_read_count += 1
-                                elif not _is_excluded_read_path(read_path):
-                                    read_file_count += 1
-                                    reads_since_last_research += 1
-                                    prev_turn_had_read_file = True
-                                    if read_path:
-                                        read_file_duplicate_count += read_path in seen_read_paths
-                                        seen_read_paths.add(read_path)
-                                    unbounded, estimated_bytes = _read_size_estimate(read_path, args)
-                                    read_file_unbounded_count += unbounded
-                                    read_file_est_bytes += estimated_bytes
-                            elif call_name == "invoke_subagent":
-                                type_name = args.get("TypeName", args.get("type_name", args.get("typeName", "")))
-                                subagent = _unquote_tool_arg(type_name).strip().lower()
-                                if subagent:
-                                    invoked_subagents[subagent] = None
-                                if subagent == "research":
-                                    reads_since_last_research = 0
-                        if turn_has_tools:
-                            remote_turn_streak = remote_turn_streak + 1 if turn_has_remote else 0
+                            next_pos = max(next_pos, pos + 1)
+                        elif next_pos < len(pending_calls):
+                            pos = next_pos
+                            next_pos += 1
+                        else:
+                            continue
+                        if str(row.get("status", "")).upper() == "ERROR":
+                            errored_indices.add(pos)
+                commit_pending_calls()
     except (OSError, ValueError):
         pass
 

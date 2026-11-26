@@ -53,6 +53,13 @@ def tool_call(name, **args):
     return {"name": name, "args": args}
 
 
+def tool_result(status, *, index=None, **fields):
+    row = {"type": "GENERIC", "source": "MODEL", "status": status, **fields}
+    if index is not None:
+        row["step_index"] = index
+    return row
+
+
 def checkpoint(index):
     return {"type": "CHECKPOINT", "stepIndex": index}
 
@@ -248,6 +255,104 @@ class HandoffFixture(unittest.TestCase):
 
 
 class TelemetryTests(HandoffFixture):
+    def test_denied_read_does_not_affect_successful_read_or_research(self):
+        path = self.root / "data.txt"
+        path.write_bytes(b"x" * 20481)
+        calls = [
+            tool_call("read_file", Path=str(path)),
+            tool_call("read_file", Path=str(path), StartLine=1, EndLine=80),
+            tool_call("invoke_subagent", TypeName="research"),
+        ]
+        self.write_transcript(
+            planner(1000, index=10, calls=calls),
+            tool_result("ERROR", index=11, error="tool call denied by pre-tool hook: codex-read-guard"),
+            tool_result("DONE", index=12),
+            tool_result("DONE", index=13),
+            planner(6000, index=14),
+        )
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 1)
+        self.assertEqual(result.read_file_unbounded_count, 0)
+        self.assertEqual(result.read_file_duplicate_count, 0)
+        self.assertEqual(result.read_file_est_bytes, 4800)
+        self.assertEqual(result.reads_since_last_research, 0)
+        self.assertEqual(result.invoked_subagents, ("research",))
+        self.assertTrue(result.last_turn_had_read_file)
+
+    def test_indexed_error_excludes_plugin_doc_across_interleaved_rows_at_eof(self):
+        calls = [
+            tool_call("read_file", Path="/workspace/data.txt", StartLine=1, EndLine=2),
+            tool_call("read_file", Path="/work/.gemini/config/plugins/example/rules/AGENTS.md"),
+        ]
+        self.write_transcript(
+            planner(1000, index=10, calls=calls),
+            {"type": "SYSTEM_MESSAGE", "source": "SYSTEM", "step_index": 11, "status": "ERROR"},
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "status": "ERROR"},
+            tool_result("ERROR", index=11, source="SYSTEM_SDK"),
+            tool_result("error", index=12),
+            tool_result("ERROR", index=13),
+        )
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 1)
+        self.assertEqual(result.read_file_est_bytes, 120)
+        self.assertEqual(result.plugin_doc_read_count, 0)
+
+    def test_indexed_denied_read_before_tail_is_excluded(self):
+        self.write_transcript(
+            planner(1000, index=10, calls=[tool_call("read_file", Path="/workspace/data.txt")]),
+            tool_result("ERROR", index=11),
+            planner(3000, index=12),
+        )
+        result = telemetry.read_transcript_telemetry(self.transcript, tail_bytes=1)
+        self.assertEqual(result.read_file_count, 0)
+        self.assertFalse(result.last_turn_had_read_file)
+
+    def test_read_errors_match_sequentially_when_indices_are_missing(self):
+        for planner_index in (None, 10):
+            with self.subTest(planner_index=planner_index):
+                calls = [
+                    tool_call("read_file", Path="/workspace/data.txt", StartLine=1, EndLine=2),
+                    tool_call("read_file", Path="/workspace/denied.txt"),
+                ]
+                row = planner(1000, index=planner_index, calls=calls)
+                if planner_index is None:
+                    del row["stepIndex"]
+                self.write_transcript(
+                    row,
+                    tool_result("DONE"),
+                    {"type": "SYSTEM_MESSAGE", "source": "SYSTEM"},
+                    tool_result("ERROR"),
+                )
+                result = telemetry.read_transcript_telemetry(self.transcript, tail_bytes=1)
+                self.assertEqual(result.read_file_count, 1)
+                self.assertEqual(result.read_file_unbounded_count, 0)
+                self.assertEqual(result.read_file_est_bytes, 120)
+                self.assertEqual(result.reads_since_last_research, 1)
+
+    def test_planner_only_reads_still_count_at_next_planner_and_eof(self):
+        call = tool_call("read_file", Path="/workspace/data.txt", StartLine=1, EndLine=2)
+        self.write_transcript(planner(1000, calls=[call]), planner(3000, calls=[call]))
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 2)
+        self.assertEqual(result.read_file_duplicate_count, 1)
+        self.assertEqual(result.read_file_est_bytes, 240)
+        self.assertEqual(result.reads_since_last_research, 2)
+        self.assertTrue(result.last_turn_had_read_file)
+
+    def test_checkpoint_discards_pending_errors_before_matching_next_turn(self):
+        call = tool_call("read_file", Path="/workspace/data.txt")
+        self.write_transcript(
+            planner(1000, index=10, calls=[call]),
+            tool_result("ERROR", index=11),
+            checkpoint(12),
+            planner(1000, index=13, calls=[call]),
+            tool_result("RUNNING", index=14),
+        )
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.checkpoint_epoch, 1)
+        self.assertEqual(result.read_file_count, 1)
+        self.assertEqual(result.read_file_duplicate_count, 0)
+
     def test_fast_skip_keeps_unicode_escaped_early_rows(self):
         escaped_checkpoint = json.dumps(checkpoint(2)).replace("CHECKPOINT", r"\u0043HECKPOINT")
         escaped_planner = json.dumps(planner(1000, calls=[tool_call("read_file", Path="/fragment")]))
@@ -1274,6 +1379,22 @@ class HookTests(HandoffFixture):
             self.assertEqual(self.hook(), {})
         self.write_transcript(self.noise_plan(1000, reads=1), planner(26000))
         self.assert_nudge(self.hook(), "read_noise", "单步激增 +25,000 tokens", "1 次")
+
+    def test_denied_only_read_does_not_trigger_read_noise_spike(self):
+        self.write_transcript(
+            planner(1000, index=10, calls=[
+                tool_call("read_file", Path="/workspace/data.txt", StartLine=1, EndLine=500),
+            ]),
+            tool_result("ERROR", index=11, error="tool call denied by pre-tool hook: codex-read-guard"),
+            planner(31000, index=12),
+        )
+        result = telemetry.read_transcript_telemetry(self.transcript)
+        self.assertEqual(result.read_file_count, 0)
+        self.assertEqual(result.reads_since_last_research, 0)
+        self.assertEqual(result.read_file_est_bytes, 0)
+        self.assertEqual(result.last_turn_delta_tokens, 30000)
+        self.assertFalse(result.last_turn_had_read_file)
+        self.assertEqual(self.hook(), {})
 
     def test_read_noise_rearms_six_reads_after_ignored_l1_and_resets(self):
         self.write_transcript(self.noise_plan(40000, reads=8))

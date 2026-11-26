@@ -1,6 +1,10 @@
 # Codex Orchestrator — Backlog & TODO
 
-## Dispatch Clarity and Synthesis Verification (`v3.8.0`)
+## Context Hygiene (`v3.9.0`)
+
+- [x] Slim the cold-start policy and skills, move advanced CLI guidance to `cli-reference.md`, add two-tier `read_noise` and `codex-read-guard`, and exclude errored reads from telemetry.
+
+## Historical release v3.8.0 — Dispatch Clarity and Synthesis Verification
 
 - [x] Route verbosity declaratively and add the per-dispatch Output Clarity Contract.
 - [x] Add structured review receipts and facts-only implementation previews.

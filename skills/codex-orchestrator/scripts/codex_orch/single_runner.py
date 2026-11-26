@@ -26,7 +26,7 @@ RESUME_BLOAT_TOKEN_THRESHOLD = 1_000_000
 _SESSION_SEARCH_EXCLUDED_DIRS = {"attempts", "_worktrees", ".git", "__pycache__", "node_modules"}
 MODES = ("consult", "implement", "review", "resume", "research", "critique", "analyze")
 
-USAGE = """run_codex.sh v3.8.0
+USAGE = """run_codex.sh v3.9.0
 
 Usage:
   run_codex.sh consult   --dir <DIR> (--spec <FILE> | --prompt <TEXT>) [options]

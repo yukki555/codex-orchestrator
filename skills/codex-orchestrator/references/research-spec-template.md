@@ -1,4 +1,4 @@
-# Research / Critique / Analysis Spec Template (GPT-6.2 Tuned, v3.8)
+# Research / Critique / Analysis Spec Template (GPT-6.2 Tuned, v3.9)
 
 Copy this structure to `/tmp/codex-orchestrator/<task-id>/spec-<slice>.md` before dispatching via `run_codex.sh research|critique|analyze` or `run_codex_parallel.sh --manifest`.
 

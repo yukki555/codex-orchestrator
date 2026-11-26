@@ -1,8 +1,8 @@
 {
   "name": "codex-orchestrator",
   "displayName": "Codex Orchestrator",
-  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.8) with declarative verbosity, structured review receipts, facts-only implementation previews, and objective-first verification. Includes verified patch custody, opt-in cross-model TDD, and native session handoff.",
-  "version": "3.8.0",
+  "description": "Dual-Brain orchestration plugin for Google Antigravity (v3.9) with a slim cold start, two-tier read-noise nudges, and a PreToolUse read guard. Includes verified patch custody, opt-in cross-model TDD, and native session handoff.",
+  "version": "3.9.0",
   "logo": "assets/logo.svg",
   "repository": "https://github.com/yukki555/codex-orchestrator",
   "suggestedPrompts": [
