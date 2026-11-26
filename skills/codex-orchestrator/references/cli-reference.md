@@ -90,10 +90,11 @@ For `validate`, `plan`, and a fresh `start`, inventory resolution is `--cluster`
 | `uncordon --host <id> [--gpu <index>]` | Allows new placements on the selected host or GPU. |
 | `requeue --task <id>\|--failed` | Requeues a selected task or failed tasks. |
 | `cancel --task <id>\|--all` | Cancels a selected task or all tasks. |
+| `add-tasks --tasks <file.json>` | Validates and appends new tasks (array or manifest fragment) into an active run under lock. |
 | `pull [--task <id>] [--dest <dir>]` | Pulls lightweight results, defaulting to `<run_dir>/results/<task_id>/`. |
-| `stop [--kill-remote]` | Stops the controller. The flag also stops active remote attempts. |
+| `stop [--kill-remote]` | Stops the controller. The flag stops active remote attempts and marks confirmed kills `cancelled`. |
 
-Use `--manifest` for `validate`, `plan`, and fresh `start`. Pass `--run-dir` to `start` and every command that operates on an existing run. Exit codes are `0` for successful CLI completion, `1` for an operational error, `2` for invalid arguments or configuration, `6` for startup without a healthy host or task progress, and `128+sig` when the controller loop is interrupted by a handled signal. Check the receipt or status for individual task outcomes.
+Use `--manifest` for `validate`, `plan`, and fresh `start`. Pass `--run-dir` to `start` and every command that operates on an existing run. Manifest tasks support `{inputs_dir}` alongside `{dep.<id>.out_dir}`, `stall_timeout_s`, multi-GPU `draining_for` reservation, and resumable SHA256-verified cross-host `relay_inputs` (capped by `max_bytes`). Active runs are registered in `$PLUGIN_DATA/dispatch_runs.json` and auto-included in `handoff.sh create` Section 9 (`dispatch_runs`, or pass `--dispatch-run-dir <dir>`). Exit codes are `0` for successful CLI completion, `1` for an operational error, `2` for invalid arguments or configuration, `6` for startup without a healthy host or task progress, and `128+sig` when the controller loop is interrupted by a handled signal. Check the receipt or status for individual task outcomes.
 
 ```sh
 SCRIPTS=~/.gemini/config/plugins/codex-orchestrator/skills/codex-orchestrator/scripts

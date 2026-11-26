@@ -18,7 +18,7 @@ description: Inspect Antigravity context, write a verified handoff packet, and l
 - **`## 7. Codex Orchestrator & Artifact State`**. Link relevant specs, receipts, verification files, and thread IDs. Say which threads can resume.
 - **`## 8. Open Risks, Unverified Boundaries & Pending User Decisions`**. Record unverified items and decisions that need the user.
 
-4. Run `handoff.sh create --packet "<draft>" --workspace "<repo>" --artifact-dir "<artifacts>" --resume-mode auto` with the same script. Use `pause` when a user decision is pending. Add `--archive-old` only with user authorization. Explicit `CODEX_HANDOFF_MODE` takes precedence over chain inheritance.
+4. Run `handoff.sh create --packet "<draft>" --workspace "<repo>" --artifact-dir "<artifacts>" --resume-mode auto` with the same script. Use `pause` when a user decision is pending. Add `--archive-old` only with user authorization. Explicit `CODEX_HANDOFF_MODE` takes precedence over chain inheritance. Pass `--dispatch-run-dir <dir>` to pin a dispatch run alongside auto-discovered active runs.
    - The CLI appends the Section 9 snapshot and writes the manifest and receipt. The successor reads only `handoff-hop-NN.md` at cold start. It checks Git state and opens Section 6 fragments on demand or invokes `research` on Turn 1 when it must understand >= 3 files.
    - On exit 7, report the persisted fallback prompt path so the user can start the successor manually.
 5. **Terminal-Action Receipt**. After exit 0, stop all workspace mutations. Report the clickable successor conversation and packet, context usage and limit, model, hop count and limit, and the next atomic action in natural Chinese.
